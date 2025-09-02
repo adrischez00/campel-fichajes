@@ -1,0 +1,29 @@
+# Env / secretos
+.env
+.env.*
+!.env.example
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Node
+node_modules/
+dist/
+build/
+*.log
+
+# Claves / dumps
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*service-account*.json
+*.sqlite
+*.db
+*.sql
+*.dump
+dump*.sql

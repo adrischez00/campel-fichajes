@@ -1,0 +1,50 @@
+# Node
+node_modules/
+**/node_modules/
+
+# Python / venv
+**/.venv/
+**/venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Secretos / env
+.env
+*.env
+backend/.env
+frontend/.env
+
+# Entornos / secretos
+*.env
+.env.*
+backend/.env*
+frontend/.env*
+backend/env.yaml
+backend/env.prod
+
+# Bases de datos y binarios
+*.db
+*.sqlite*
+*.pdf
+/backend/test.db
+
+# Exportaciones y artefactos
+/backend/export_*.pdf
+
+# Builds
+venv/
+.venv/
+__pycache__/
+node_modules/
+dist/
+build/
+
+# Logs
+*.log
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
