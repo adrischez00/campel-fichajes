@@ -53,19 +53,6 @@ npm run dev
 ```
 
 Accede a `http://localhost:5173`
-
----
-
-## 👥 Usuarios de prueba
-
-| Email              | Contraseña | Rol       |
-|--------------------|------------|-----------|
-| may@campel.com     | may1234    | Empleado  |
-| adri@campel.com    | adri1234   | Empleado  |
-| admin@campel.com   | admin1234  | Admin     |
-
-Puedes crearlos en la base de datos usando SQL o insertando desde backend temporalmente.
-
 ---
 
 ## 🌐 Despliegue en producción
