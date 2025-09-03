@@ -10,16 +10,18 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
-from app import database, crud, auth, utils, models
 from app.database import engine, get_db
 from app.models import Base, User
+from app import crud, auth, utils
 from app.schemas import UserOut, UsuarioUpdate, UsuarioPassword
 from app.routes import logs as logs_router
 from app.routes import calendar
 from app.routes import ausencias as ausencias_router
-from app.routes import auth as auth_routes  # ⬅️ IMPORTANTE: router de auth
+from app.routes import auth as auth_routes
+from app.schemas_solicitudes import ResolverSolicitudIn  # ⬅️ usa este tipo directamente
 
 # ---------------- Bootstrapping DB ----------------
+# Evita tareas largas aquí. Solo create_all (rápido).
 Base.metadata.create_all(bind=engine)
 
 # ---------------- App ----------------
@@ -34,16 +36,14 @@ def health():
 app.add_api_route("/api/health", health, methods=["GET"])
 
 # ---------------- CORS (Cloudflare Pages) ----------------
-# Fronts permitidos (tu actual y el staging nuevo)
 STATIC_ALLOWED = [
-    "https://campel-fichajes.pages.dev",   # nuevo (staging con Git)
-    "https://sistema-fichajes.pages.dev",  # actual en producción que usan ahora
+    "https://campel-fichajes.pages.dev",   # staging con Git (nuevo)
+    "https://sistema-fichajes.pages.dev",  # prod actual
 ]
-
-# Previews automáticos de Cloudflare Pages para campel-fichajes
+# Previews automáticos de Cloudflare Pages del nuevo proyecto
 PAGES_PREVIEWS_REGEX = r"^https://[a-z0-9-]+\.campel-fichajes\.pages\.dev$"
 
-# Permite añadir orígenes extra vía variable de entorno ALLOWED_ORIGINS (coma-separada)
+# Orígenes extra por env var (coma-separada)
 extra = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 ALLOWED_ORIGINS = list(dict.fromkeys(STATIC_ALLOWED + extra))
 
@@ -51,7 +51,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_origin_regex=PAGES_PREVIEWS_REGEX,
-    allow_credentials=False,     # Usa False si autenticas por Authorization: Bearer
+    allow_credentials=False,     # True solo si vas a usar cookies; con Bearer = False
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
@@ -70,9 +70,7 @@ class RegistroIn(BaseModel):
     password: str
     role: str = "employee"
 
-# ==================== HANDLERS (lógica real) ====================
-
-# ---- Auth (form-urlencoded estándar OAuth2PasswordRequestForm) ----
+# ==================== HANDLERS ====================
 def login_handler(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = crud.autenticar_usuario(db, form_data.username, form_data.password)
     if not user:
@@ -80,11 +78,10 @@ def login_handler(form_data: OAuth2PasswordRequestForm = Depends(), db: Session 
     token = auth.crear_token_acceso({"sub": user.email, "role": user.role})
     return {"access_token": token, "token_type": "bearer"}
 
-# ---- Usuarios / administración ----
 def registrar_handler(
     datos: RegistroIn,
     db: Session = Depends(get_db),
-    solicitante: User = Depends(get_current_user := auth.get_current_user)
+    solicitante: User = Depends(auth.get_current_user)
 ):
     if solicitante.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
@@ -97,7 +94,7 @@ def registrar_handler(
 
 def listar_usuarios_handler(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(auth.get_current_user)
 ):
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
@@ -107,7 +104,7 @@ def actualizar_usuario_handler(
     usuario_id: int,
     datos: UsuarioUpdate,
     db: Session = Depends(get_db),
-    usuario: User = Depends(get_current_user)
+    usuario: User = Depends(auth.get_current_user)
 ):
     if usuario.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
@@ -116,7 +113,7 @@ def actualizar_usuario_handler(
 def eliminar_usuario_handler(
     usuario_id: int,
     db: Session = Depends(get_db),
-    usuario: User = Depends(get_current_user)
+    usuario: User = Depends(auth.get_current_user)
 ):
     if usuario.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
@@ -126,17 +123,16 @@ def restablecer_password_handler(
     usuario_id: int,
     datos: UsuarioPassword,
     db: Session = Depends(get_db),
-    usuario: User = Depends(get_current_user)
+    usuario: User = Depends(auth.get_current_user)
 ):
     if usuario.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
     return crud.restablecer_password(db, usuario_id, datos.nueva_password)
 
-# ---- Fichajes ----
 def fichar_handler(
     tipo: str = Form(...),
     db: Session = Depends(get_db),
-    usuario: User = Depends(get_current_user)
+    usuario: User = Depends(auth.get_current_user)
 ):
     return crud.crear_fichaje(db, tipo, usuario)
 
@@ -148,17 +144,16 @@ def obtener_fichajes_handler(usuario: str = Header(...), db: Session = Depends(g
 
 def resumen_fichajes_handler(
     db: Session = Depends(get_db),
-    usuario: User = Depends(get_current_user)
+    usuario: User = Depends(auth.get_current_user)
 ):
     return crud.resumen_fichajes_usuario(db, usuario)
 
 def resumen_semana_handler(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(auth.get_current_user),
 ):
     return crud.resumen_semana_usuario(db, current_user)
 
-# ---- Solicitudes ----
 def solicitar_fichaje_manual_handler(data: SolicitudManualIn, usuario: str = Header(...), db: Session = Depends(get_db)):
     user = crud.obtener_usuario_por_email(db, usuario)
     if not user:
@@ -170,11 +165,10 @@ def listar_solicitudes_handler(db: Session = Depends(get_db)):
 
 def resolver_solicitud_handler(
     req: Request,
-    body: models.ResolverSolicitudIn if hasattr(models, "ResolverSolicitudIn") else ...,
+    body: ResolverSolicitudIn,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
+    current_user: User = Depends(auth.get_current_user)
 ):
-    # Si ya importaste ResolverSolicitudIn desde app.schemas_solicitudes, usa ese tipo.
     if current_user.role not in ("admin", "manager"):
         raise HTTPException(status_code=403, detail="No autorizado")
 
@@ -189,7 +183,6 @@ def resolver_solicitud_handler(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ---- Export ----
 def exportar_handler(usuario: str, db: Session = Depends(get_db)):
     usuario = usuario.strip()
     user = crud.obtener_usuario_por_email(db, usuario)
@@ -199,14 +192,11 @@ def exportar_handler(usuario: str, db: Session = Depends(get_db)):
     return utils.exportar_pdf(user.email, fichajes)
 
 # ==================== MONTAJE CANÓNICO (/api) ====================
-# Routers funcionales (todos bajo /api)
 app.include_router(calendar.router,         prefix="/api",      tags=["calendar"])
 app.include_router(ausencias_router.router, prefix="/api",      tags=["ausencias"])
 app.include_router(logs_router.router,      prefix="/api/logs", tags=["logs"])
-app.include_router(auth_routes.router,      prefix="/api/auth", tags=["auth"])  # ⬅️ clave
+app.include_router(auth_routes.router,      prefix="/api/auth", tags=["auth"])
 
-# Endpoints que estaban en main -> ahora canónicos bajo /api
-from app.schemas_solicitudes import ResolverSolicitudIn  # tipado correcto
 app.add_api_route("/api/registrar",             registrar_handler,             methods=["POST"])
 app.add_api_route("/api/usuarios",              listar_usuarios_handler,       methods=["GET"], response_model=List[UserOut])
 app.add_api_route("/api/usuarios/{usuario_id}", actualizar_usuario_handler,    methods=["PUT"])
@@ -222,85 +212,86 @@ app.add_api_route("/api/resolver-solicitud",    resolver_solicitud_handler,    m
 app.add_api_route("/api/exportar-pdf",          exportar_handler,              methods=["GET"])
 
 # ==================== REDIRECTS LEGACY (sin /api -> /api) ====================
-# Nota: 307 conserva método y body en POST/PUT/DELETE.
+def _redir(url: str):
+    return RedirectResponse(url=url, status_code=307)
 
 # Auth legacy
 @app.api_route("/login", methods=["POST"], include_in_schema=False)
 def legacy_login_redirect():
-    return RedirectResponse(url="/api/auth/login", status_code=307)
+    return _redir("/api/auth/login")
 
 @app.api_route("/auth/login", methods=["POST"], include_in_schema=False)
 def legacy_auth_login_redirect():
-    return RedirectResponse(url="/api/auth/login", status_code=307)
+    return _redir("/api/auth/login")
 
 @app.api_route("/auth/login-json", methods=["POST"], include_in_schema=False)
 def legacy_auth_login_json_redirect():
-    return RedirectResponse(url="/api/auth/login-json", status_code=307)
+    return _redir("/api/auth/login-json")
 
 # Usuarios
 @app.api_route("/registrar", methods=["POST"], include_in_schema=False)
 def legacy_registrar_redirect():
-    return RedirectResponse(url="/api/registrar", status_code=307)
+    return _redir("/api/registrar")
 
 @app.api_route("/usuarios", methods=["GET"], include_in_schema=False)
 def legacy_listar_usuarios_redirect():
-    return RedirectResponse(url="/api/usuarios", status_code=307)
+    return _redir("/api/usuarios")
 
 @app.api_route("/usuarios/{usuario_id}", methods=["PUT"], include_in_schema=False)
 def legacy_actualizar_usuario_redirect(usuario_id: int):
-    return RedirectResponse(url=f"/api/usuarios/{usuario_id}", status_code=307)
+    return _redir(f"/api/usuarios/{usuario_id}")
 
 @app.api_route("/usuarios/{usuario_id}", methods=["DELETE"], include_in_schema=False)
 def legacy_eliminar_usuario_redirect(usuario_id: int):
-    return RedirectResponse(url=f"/api/usuarios/{usuario_id}", status_code=307)
+    return _redir(f"/api/usuarios/{usuario_id}")
 
 @app.api_route("/usuarios/{usuario_id}/restablecer", methods=["POST"], include_in_schema=False)
 def legacy_restablecer_password_redirect(usuario_id: int):
-    return RedirectResponse(url=f"/api/usuarios/{usuario_id}/restablecer", status_code=307)
+    return _redir(f"/api/usuarios/{usuario_id}/restablecer")
 
 # Fichajes
 @app.api_route("/fichar", methods=["POST"], include_in_schema=False)
 def legacy_fichar_redirect():
-    return RedirectResponse(url="/api/fichar", status_code=307)
+    return _redir("/api/fichar")
 
 @app.api_route("/fichajes", methods=["GET"], include_in_schema=False)
 def legacy_fichajes_redirect():
-    return RedirectResponse(url="/api/fichajes", status_code=307)
+    return _redir("/api/fichajes")
 
 @app.api_route("/resumen-fichajes", methods=["GET"], include_in_schema=False)
 def legacy_resumen_fichajes_redirect():
-    return RedirectResponse(url="/api/resumen-fichajes", status_code=307)
+    return _redir("/api/resumen-fichajes")
 
 @app.api_route("/resumen-semana", methods=["GET"], include_in_schema=False)
 def legacy_resumen_semana_redirect():
-    return RedirectResponse(url="/api/resumen-semana", status_code=307)
+    return _redir("/api/resumen-semana")
 
 # Solicitudes
 @app.api_route("/solicitar-fichaje-manual", methods=["POST"], include_in_schema=False)
 def legacy_solicitar_manual_redirect():
-    return RedirectResponse(url="/api/solicitar-fichaje-manual", status_code=307)
+    return _redir("/api/solicitar-fichaje-manual")
 
 @app.api_route("/solicitudes", methods=["GET"], include_in_schema=False)
 def legacy_listar_solicitudes_redirect():
-    return RedirectResponse(url="/api/solicitudes", status_code=307)
+    return _redir("/api/solicitudes")
 
 @app.api_route("/resolver-solicitud", methods=["POST"], include_in_schema=False)
 def legacy_resolver_solicitud_redirect():
-    return RedirectResponse(url="/api/resolver-solicitud", status_code=307)
+    return _redir("/api/resolver-solicitud")
 
 # Export
 @app.api_route("/exportar-pdf", methods=["GET"], include_in_schema=False)
 def legacy_exportar_redirect():
-    return RedirectResponse(url="/api/exportar-pdf", status_code=307)
+    return _redir("/api/exportar-pdf")
 
 # Routers legacy (wildcards) -> /api
 @app.api_route("/logs/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], include_in_schema=False)
 def legacy_logs_wildcard_redirect(path: str):
-    return RedirectResponse(url=f"/api/logs/{path}", status_code=307)
+    return _redir(f"/api/logs/{path}")
 
 @app.api_route("/ausencias/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], include_in_schema=False)
 def legacy_ausencias_wildcard_redirect(path: str):
-    return RedirectResponse(url=f"/api/ausencias/{path}", status_code=307)
+    return _redir(f"/api/ausencias/{path}")
 
 # ---------------- Static ----------------
 app.mount("/static", StaticFiles(directory="static"), name="static")
