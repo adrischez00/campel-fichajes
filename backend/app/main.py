@@ -51,7 +51,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_origin_regex=PAGES_PREVIEWS_REGEX,
-    allow_credentials=False,     # True solo si vas a usar cookies; con Bearer = False
+    allow_credentials=True,     # True solo si vas a usar cookies; con Bearer = False
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=["*"],
