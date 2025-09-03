@@ -3,6 +3,8 @@ from sqlalchemy import (
     func, UniqueConstraint
 )
 from sqlalchemy.orm import relationship, declarative_base
+from sqlalchemy import Enum as SAEnum, Numeric
+import enum
 
 Base = declarative_base()
 
@@ -198,3 +200,115 @@ class CalendarFeedStg(Base):
     fuente = Column(String, nullable=True)
     imported_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
+# =========================
+# Convenios, Reglas y Saldos de Ausencias
+# =========================
+
+class TipoAusenciaEnum(enum.Enum):
+    VACACIONES = "VACACIONES"
+    ASUNTOS_PROPIOS = "ASUNTOS_PROPIOS"
+    BAJA = "BAJA"
+    CITA_MEDICA = "CITA_MEDICA"
+    OTRA = "OTRA"
+
+
+class ComputoDiasEnum(enum.Enum):
+    LABORABLES = "LABORABLES"
+    NATURALES = "NATURALES"
+
+
+class DevengoEnum(enum.Enum):
+    ANUAL = "ANUAL"
+    MENSUAL = "MENSUAL"
+
+
+class Convenio(Base):
+    __tablename__ = "convenios"
+
+    id = Column(Integer, primary_key=True)
+    nombre = Column(String(120), unique=True, nullable=False, index=True)
+    activo = Column(Boolean, default=True, nullable=False)
+
+    reglas = relationship("ReglaAusencia", back_populates="convenio", cascade="all, delete-orphan")
+    usuarios = relationship("UsuarioConvenio", back_populates="convenio", cascade="all, delete-orphan")
+
+
+class ReglaAusencia(Base):
+    __tablename__ = "reglas_ausencia"
+
+    id = Column(Integer, primary_key=True)
+    convenio_id = Column(Integer, ForeignKey("convenios.id", ondelete="CASCADE"), nullable=False, index=True)
+    tipo = Column(SAEnum(TipoAusenciaEnum), nullable=False, index=True)
+
+    # Parámetros de la regla
+    dias_anuales = Column(Numeric(5, 2), nullable=False)  # p.ej. 30.00
+    computo = Column(SAEnum(ComputoDiasEnum), nullable=False, default=ComputoDiasEnum.LABORABLES)
+    permite_mediodia = Column(Boolean, nullable=False, default=True)
+    devengo = Column(SAEnum(DevengoEnum), nullable=False, default=DevengoEnum.ANUAL)
+    arrastre_max_dias = Column(Numeric(5, 2), nullable=True)      # p.ej. 5.00
+    caducidad_arrastre_mes = Column(Integer, nullable=True)       # p.ej. 3 (marzo => 31/03)
+
+    convenio = relationship("Convenio", back_populates="reglas")
+
+    __table_args__ = (
+        UniqueConstraint("convenio_id", "tipo", name="uq_regla_convenio_tipo"),
+    )
+
+
+class UsuarioConvenio(Base):
+    __tablename__ = "usuarios_convenio"
+
+    id = Column(Integer, primary_key=True)
+    usuario_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    convenio_id = Column(Integer, ForeignKey("convenios.id", ondelete="RESTRICT"), nullable=False, index=True)
+    vigente_desde = Column(Date, nullable=False, index=True)
+    vigente_hasta = Column(Date, nullable=True, index=True)
+
+    usuario = relationship("User")
+    convenio = relationship("Convenio", back_populates="usuarios")
+
+    __table_args__ = (
+        UniqueConstraint("usuario_id", "convenio_id", "vigente_desde", name="uq_usuario_convenio_desde"),
+    )
+
+
+class SaldoAusencia(Base):
+    """
+    Saldo anual por usuario + tipo de ausencia.
+    disponible = asignado + arrastre - gastado
+    """
+    __tablename__ = "saldos_ausencia"
+
+    id = Column(Integer, primary_key=True)
+    usuario_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    tipo = Column(SAEnum(TipoAusenciaEnum), nullable=False, index=True)
+    anio = Column(Integer, nullable=False, index=True)
+
+    asignado = Column(Numeric(6, 2), nullable=False, default=0)  # total del año (regla + arrastre)
+    arrastre = Column(Numeric(6, 2), nullable=False, default=0)  # carry-over aplicado
+    gastado = Column(Numeric(6, 2), nullable=False, default=0)   # consumido por aprobaciones
+
+    __table_args__ = (
+        UniqueConstraint("usuario_id", "tipo", "anio", name="uq_saldo_usuario_tipo_anio"),
+    )
+
+
+class MotivoMovimientoEnum(enum.Enum):
+    ASIGNACION = "ASIGNACION"   # + asignación anual o arrastre
+    APROBACION = "APROBACION"   # - por aprobación de ausencia
+    REVERSO = "REVERSO"         # + por anulación/revocación
+    AJUSTE = "AJUSTE"           # +/- ajuste manual
+    ARRASTRE = "ARRASTRE"       # + traspaso de días entre años
+
+
+class MovimientoSaldoAusencia(Base):
+    __tablename__ = "movimientos_saldo_ausencia"
+
+    id = Column(Integer, primary_key=True)
+    saldo_id = Column(Integer, ForeignKey("saldos_ausencia.id", ondelete="CASCADE"), nullable=False, index=True)
+    fecha = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+    delta = Column(Numeric(6, 2), nullable=False)  # negativo al consumir; positivo al revertir/asignar
+    motivo = Column(SAEnum(MotivoMovimientoEnum), nullable=False, index=True)
+    referencia = Column(String(50), nullable=True)  # p.ej. "ausencia:123" para auditoría
+
+    saldo = relationship("SaldoAusencia")
