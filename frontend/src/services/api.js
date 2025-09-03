@@ -145,7 +145,7 @@ async function request(method, endpoint, { body, token = null, headers = {}, sig
       }
     } else {
       // Esperar a que termine el refresh en curso
-      await new Promise((resolve) => waiters.push(() => resolve()));
+      await new Promise((resolve) => waiters.push((/*newAccess*/) => resolve()));
     }
     // Reintentar 1 vez con nuevo access en storage
     const tokenAfter = storage.get();

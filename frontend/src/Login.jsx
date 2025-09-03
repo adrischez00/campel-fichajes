@@ -42,7 +42,7 @@ export default function Login({ onLogin }) {
       const userFromResp = data?.user || data?.usuario || null;
       const role = payload.role || userFromResp?.role || userFromResp?.rol || "employee";
       const user = payload.sub || payload.email || userFromResp || email;
-
+      
       // Devolvemos la sesión al App para que pinte el panel correspondiente
       onLogin({ token, role, user });
     } catch (err) {
