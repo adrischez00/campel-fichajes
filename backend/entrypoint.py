@@ -1,34 +1,42 @@
-import os, sys, time, traceback
+import os, sys, logging
 
-print("[BOOT] starting image:", os.getenv("IMAGE_MARK"), flush=True)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger("boot")
 
-# 1) Probar import de la app
-try:
-    print("[BOOT] importing app.main:app ...", flush=True)
-    from app.main import app
-    print("[BOOT] import OK", flush=True)
-except Exception as e:
-    print("[BOOT] import FAILED:", repr(e), file=sys.stderr, flush=True)
-    traceback.print_exc()
-    time.sleep(300)  # deja tiempo para leer logs
-    sys.exit(1)
-
-# 2) Levantar uvicorn desde Python (para ver tracebacks reales)
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", "8080"))
-    try:
-        import uvicorn
-        print(f"[BOOT] starting uvicorn on 0.0.0.0:{port}", flush=True)
-        uvicorn.run(
-            app,
-            host="0.0.0.0",
-            port=port,
-            log_level="debug",
-            proxy_headers=True,
-            forwarded_allow_ips="*",
-        )
-    except Exception as e:
-        print("[BOOT] uvicorn FAILED:", repr(e), file=sys.stderr, flush=True)
-        traceback.print_exc()
-        time.sleep(300)
+def require(name: str) -> str:
+    val = os.getenv(name)
+    if not val:
+        log.error("Missing required env var: %s", name)
         sys.exit(1)
+    return val
+
+def main():
+    # Requisitos mínimos para arrancar
+    secret = require("SECRET_KEY")
+    db_url = require("DATABASE_URL")
+    port = int(os.getenv("PORT", "8080"))
+
+    log.info("Starting app on port %s", port)
+    # No mostramos valores, solo nombres para no filtrar secretos
+    log.info("Env OK: SECRET_KEY, DATABASE_URL")
+
+    # Arranque uvicorn (con exec para ser PID 1)
+    os.execvp(
+        "uvicorn",
+        [
+            "uvicorn",
+            "app.main:app",
+            "--host", "0.0.0.0",
+            "--port", str(port),
+            "--proxy-headers",
+            "--forwarded-allow-ips", "*",
+        ],
+    )
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        log.exception("Fatal error on startup")
+        sys.exit(1)
+
