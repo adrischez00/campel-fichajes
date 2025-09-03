@@ -194,8 +194,8 @@ def exportar_handler(usuario: str, db: Session = Depends(get_db)):
 # ==================== MONTAJE CANÓNICO (/api) ====================
 app.include_router(calendar.router,         prefix="/api",      tags=["calendar"])
 app.include_router(ausencias_router.router, prefix="/api",      tags=["ausencias"])
-app.include_router(logs_router.router,      prefix="/api/logs", tags=["logs"])
-app.include_router(auth_routes.router,      prefix="/api/auth", tags=["auth"])
+app.include_router(logs_router.router,      prefix="/api/", tags=["logs"])
+app.include_router(auth_routes.router,      prefix="/api/", tags=["auth"])
 
 app.add_api_route("/api/registrar",             registrar_handler,             methods=["POST"])
 app.add_api_route("/api/usuarios",              listar_usuarios_handler,       methods=["GET"], response_model=List[UserOut])
