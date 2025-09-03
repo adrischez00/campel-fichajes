@@ -1,4 +1,4 @@
-# backend/app/main.pes.router, prefix="/api"y
+# backend/app/main.py
 import os
 from typing import List
 
@@ -9,7 +9,6 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from app.routes import auth as auth_routes
 
 from app import database, crud, auth, utils, models
 from app.database import engine, get_db
@@ -17,9 +16,8 @@ from app.models import Base, User
 from app.schemas import UserOut, UsuarioUpdate, UsuarioPassword
 from app.routes import logs as logs_router
 from app.routes import calendar
-from app.schemas_solicitudes import ResolverSolicitudIn
 from app.routes import ausencias as ausencias_router
-from app.auth import get_current_user
+from app.routes import auth as auth_routes  # ⬅️ IMPORTANTE: router de auth
 
 # ---------------- Bootstrapping DB ----------------
 Base.metadata.create_all(bind=engine)
@@ -36,12 +34,16 @@ def health():
 app.add_api_route("/api/health", health, methods=["GET"])
 
 # ---------------- CORS (Cloudflare Pages) ----------------
+# Fronts permitidos (tu actual y el staging nuevo)
 STATIC_ALLOWED = [
-    "https://sistema-fichajes.pages.dev",
-    "https://sistema-fichajes-staging.pages.dev",
+    "https://campel-fichajes.pages.dev",   # nuevo (staging con Git)
+    "https://sistema-fichajes.pages.dev",  # actual en producción que usan ahora
 ]
-PAGES_PREVIEWS_REGEX = r"^https://[a-z0-9-]+\.sistema-fichajes\.pages\.dev$"
 
+# Previews automáticos de Cloudflare Pages para campel-fichajes
+PAGES_PREVIEWS_REGEX = r"^https://[a-z0-9-]+\.campel-fichajes\.pages\.dev$"
+
+# Permite añadir orígenes extra vía variable de entorno ALLOWED_ORIGINS (coma-separada)
 extra = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 ALLOWED_ORIGINS = list(dict.fromkeys(STATIC_ALLOWED + extra))
 
@@ -49,11 +51,12 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_origin_regex=PAGES_PREVIEWS_REGEX,
-    allow_credentials=True,   # ⬅️ NECESARIO para cookies httpOnly (refresh)
+    allow_credentials=False,     # Usa False si autenticas por Authorization: Bearer
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=86400,
 )
-
 
 # ---------------- Modelos de entrada ----------------
 class SolicitudManualIn(BaseModel):
@@ -81,7 +84,7 @@ def login_handler(form_data: OAuth2PasswordRequestForm = Depends(), db: Session 
 def registrar_handler(
     datos: RegistroIn,
     db: Session = Depends(get_db),
-    solicitante: User = Depends(get_current_user)
+    solicitante: User = Depends(get_current_user := auth.get_current_user)
 ):
     if solicitante.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
@@ -167,10 +170,11 @@ def listar_solicitudes_handler(db: Session = Depends(get_db)):
 
 def resolver_solicitud_handler(
     req: Request,
-    body: ResolverSolicitudIn,
+    body: models.ResolverSolicitudIn if hasattr(models, "ResolverSolicitudIn") else ...,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ):
+    # Si ya importaste ResolverSolicitudIn desde app.schemas_solicitudes, usa ese tipo.
     if current_user.role not in ("admin", "manager"):
         raise HTTPException(status_code=403, detail="No autorizado")
 
@@ -196,12 +200,13 @@ def exportar_handler(usuario: str, db: Session = Depends(get_db)):
 
 # ==================== MONTAJE CANÓNICO (/api) ====================
 # Routers funcionales (todos bajo /api)
-app.include_router(calendar.router,         prefix="/api", tags=["calendar"])
-app.include_router(ausencias_router.router, prefix="/api")          # router ya tiene prefix="/ausencias"
-app.include_router(logs_router.router,      prefix="/api/logs")     # logs bajo /api/logs
-
+app.include_router(calendar.router,         prefix="/api",      tags=["calendar"])
+app.include_router(ausencias_router.router, prefix="/api",      tags=["ausencias"])
+app.include_router(logs_router.router,      prefix="/api/logs", tags=["logs"])
+app.include_router(auth_routes.router,      prefix="/api/auth", tags=["auth"])  # ⬅️ clave
 
 # Endpoints que estaban en main -> ahora canónicos bajo /api
+from app.schemas_solicitudes import ResolverSolicitudIn  # tipado correcto
 app.add_api_route("/api/registrar",             registrar_handler,             methods=["POST"])
 app.add_api_route("/api/usuarios",              listar_usuarios_handler,       methods=["GET"], response_model=List[UserOut])
 app.add_api_route("/api/usuarios/{usuario_id}", actualizar_usuario_handler,    methods=["PUT"])
@@ -219,7 +224,7 @@ app.add_api_route("/api/exportar-pdf",          exportar_handler,              m
 # ==================== REDIRECTS LEGACY (sin /api -> /api) ====================
 # Nota: 307 conserva método y body en POST/PUT/DELETE.
 
-# Auth
+# Auth legacy
 @app.api_route("/login", methods=["POST"], include_in_schema=False)
 def legacy_login_redirect():
     return RedirectResponse(url="/api/auth/login", status_code=307)
@@ -227,6 +232,10 @@ def legacy_login_redirect():
 @app.api_route("/auth/login", methods=["POST"], include_in_schema=False)
 def legacy_auth_login_redirect():
     return RedirectResponse(url="/api/auth/login", status_code=307)
+
+@app.api_route("/auth/login-json", methods=["POST"], include_in_schema=False)
+def legacy_auth_login_json_redirect():
+    return RedirectResponse(url="/api/auth/login-json", status_code=307)
 
 # Usuarios
 @app.api_route("/registrar", methods=["POST"], include_in_schema=False)
@@ -285,12 +294,10 @@ def legacy_exportar_redirect():
     return RedirectResponse(url="/api/exportar-pdf", status_code=307)
 
 # Routers legacy (wildcards) -> /api
-# logs
 @app.api_route("/logs/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], include_in_schema=False)
 def legacy_logs_wildcard_redirect(path: str):
     return RedirectResponse(url=f"/api/logs/{path}", status_code=307)
 
-# ausencias
 @app.api_route("/ausencias/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], include_in_schema=False)
 def legacy_ausencias_wildcard_redirect(path: str):
     return RedirectResponse(url=f"/api/ausencias/{path}", status_code=307)
