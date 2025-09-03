@@ -1,4 +1,3 @@
-# backend/app/routes/logs.py
 from fastapi import APIRouter, Depends, Query, HTTPException, Request, Response
 from typing import Literal, Any
 from sqlalchemy.orm import Session
@@ -10,13 +9,14 @@ from app.exportadores.export_xlsx import ExportadorXLSX
 from app.exportadores.export_pdf import ExportadorPDF
 import traceback
 
-router = APIRouter()
+# ⬅️ Ahora todas las rutas cuelgan de /api/logs
+router = APIRouter(prefix="/logs", tags=["logs"])
 
-@router.get("")   # ← /logs   (sin barra final)
+@router.get("")   # → /api/logs
 def obtener_logs(db: Session = Depends(get_db)):
     return crud.obtener_logs(db)
 
-@router.post("/exportar_logs", response_class=Response)
+@router.post("/exportar_logs", response_class=Response)  # → /api/logs/exportar_logs
 async def exportar_logs(
     request: Request,
     formato: Literal["csv", "json", "pdf", "xlsx"] = Query("csv"),
