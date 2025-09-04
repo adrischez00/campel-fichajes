@@ -38,9 +38,10 @@ app.add_api_route("/api/health", health, methods=["GET"])
 # ---------------- CORS (Cloudflare Pages) ----------------
 STATIC_ALLOWED = [
     "https://sistema-fichajes.pages.dev",
-    "https://sistema-fichajes-staging.pages.dev",
+    "https://campel-fichajes.pages.dev",        # ⬅️ AÑADIDO
 ]
-PAGES_PREVIEWS_REGEX = r"^https://[a-z0-9-]+\.sistema-fichajes\.pages\.dev$"
+# Previews: <hash>.PROYECTO.pages.dev  (acepta ambos proyectos)
+PAGES_PREVIEWS_REGEX = r"^https://[a-z0-9-]+\.(sistema-fichajes|campel-fichajes)\.pages\.dev$"  # ⬅️ CAMBIADO
 
 extra = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 ALLOWED_ORIGINS = list(dict.fromkeys(STATIC_ALLOWED + extra))
@@ -49,11 +50,10 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_origin_regex=PAGES_PREVIEWS_REGEX,
-    allow_credentials=True,   # ⬅️ NECESARIO para cookies httpOnly (refresh)
+    allow_credentials=True,   # cookies/httpOnly ⇒ True
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 # ---------------- Modelos de entrada ----------------
 class SolicitudManualIn(BaseModel):
@@ -196,10 +196,26 @@ def exportar_handler(usuario: str, db: Session = Depends(get_db)):
 
 # ==================== MONTAJE CANÓNICO (/api) ====================
 # Routers funcionales (todos bajo /api)
+app.include_router(auth_routes.router,     prefix="/api/auth", tags=["auth"])
 app.include_router(calendar.router,         prefix="/api", tags=["calendar"])
 app.include_router(ausencias_router.router, prefix="/api")          # router ya tiene prefix="/ausencias"
 app.include_router(logs_router.router,      prefix="/api/logs")     # logs bajo /api/logs
 
+# ---------------- LOGIN JSON (compatibilidad frontend) ----------------
+class LoginJSON(BaseModel):
+    email: str
+    password: str
+
+@app.post("/api/auth/login-json")
+def login_json(body: LoginJSON, db: Session = Depends(get_db)):
+    user = crud.autenticar_usuario(db, body.email, body.password)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Credenciales incorrectas"
+        )
+    token = auth.crear_token_acceso({"sub": user.email, "role": user.role})
+    return {"access_token": token, "token_type": "bearer"}
 
 # Endpoints que estaban en main -> ahora canónicos bajo /api
 app.add_api_route("/api/registrar",             registrar_handler,             methods=["POST"])
