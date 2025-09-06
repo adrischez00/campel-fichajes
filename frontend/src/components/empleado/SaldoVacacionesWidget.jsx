@@ -1,6 +1,6 @@
 // src/components/empleado/SaldoVacacionesWidget.jsx
 import { useEffect, useState } from "react";
-import { getBalance } from "@/services/ausencias";
+import { ausenciasService } from "@/services/ausencias"; // ⬅️ cambia el import
 
 export default function SaldoVacacionesWidget({ tipos = ["VACACIONES", "LIBRE_DISPOSICION"] }) {
   const [data, setData] = useState(null);
@@ -8,19 +8,23 @@ export default function SaldoVacacionesWidget({ tipos = ["VACACIONES", "LIBRE_DI
 
   useEffect(() => {
     let mounted = true;
-    getBalance().then(d => mounted && setData(d)).catch(e => mounted && setErr(e.message || "Error"));
+    ausenciasService
+      .balance() // ⬅️ antes getBalance()
+      .then((d) => mounted && setData(d))
+      .catch((e) => mounted && setErr(e.message || "Error"));
     return () => { mounted = false; };
   }, []);
 
   if (err) return <div className="saldo error">Error: {err}</div>;
   if (!data) return <div className="saldo loading">Cargando saldos…</div>;
 
-  const saldos = (data.saldos || []).filter(s => tipos.includes(s.tipo));
+  const saldos = (data.saldos || []).filter((s) => tipos.includes(s.tipo));
+  const anio = data.anio ?? new Date().getFullYear();
 
   return (
     <div className="saldo grid" style={{ display: "grid", gap: 12 }}>
-      <h3>Mis saldos {data.anio}</h3>
-      {saldos.map(s => {
+      <h3>Mis saldos {anio}</h3>
+      {saldos.map((s) => {
         const total = (s.asignado || 0) + (s.arrastre || 0);
         const used = s.gastado || 0;
         const pct = total > 0 ? Math.min(100, Math.round((used / total) * 100)) : 0;
