@@ -1,12 +1,13 @@
 // src/components/empleado/EmpleadoPanel.jsx
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { API_URL, api } from '../../services/api.js'; // ⬅️ usa el cliente central
+import { api } from '../../services/api.js'; // base URL + auto-refresh centralizados
 import Header from '../shared/Header';
 import { toast } from 'react-toastify';
 import FichajeBloque from './FichajeBloque';
 import SolicitudManualForm from './SolicitudManualForm.jsx';
 import Paginacion from '../shared/Paginacion';
+import SaldoVacacionesWidget from './SaldoVacacionesWidget.jsx';
 
 // Helpers (Madrid + ISO sin zona => UTC)
 import { parseISO, yyyymmddTZ, fmtHoraISO, fmtFechaISO } from '../../utils/fecha';
@@ -45,26 +46,21 @@ export default function EmpleadoPanel({ session, onLogout }) {
   const [pagina, setPagina] = useState(1);
   const porPagina = 3;
 
+  // refresco del widget de saldos cuando el usuario ficha
+  const [saldoRefreshKey, setSaldoRefreshKey] = useState(0);
+  const bumpSaldo = () => setSaldoRefreshKey((k) => k + 1);
+
   const { token, user } = session;
   const usuarioEmail = user?.email || user;
 
   // “Hoy” en Europe/Madrid
   const hoyISO = yyyymmddTZ(new Date());
 
-  const parseMaybeJson = async (res) => {
-    const ct = (res.headers.get('content-type') || '').toLowerCase();
-    if (ct.includes('application/json')) {
-      return await res.json().catch(() => ({}));
-    }
-    const txt = await res.text().catch(() => '');
-    try { return JSON.parse(txt); } catch { return { detail: txt }; }
-  };
-
   // Cargar resumen + meta (usa cliente api -> evita /api/api y mixed content)
   const cargarResumenFichajes = useCallback(async () => {
     setCargandoResumen(true);
     try {
-      const data = await api.get('/resumen-fichajes', token); // ⬅️ antes: fetch(`${API_URL}/resumen-fichajes`)
+      const data = await api.get('/resumen-fichajes', token);
       const resumen = data?.resumen || data || {};
       const metaRx = data?._meta || {};
       setResumenFichajes(resumen);
@@ -87,7 +83,7 @@ export default function EmpleadoPanel({ session, onLogout }) {
 
   const tieneFuturos = Array.isArray(meta?.fichajes_futuros) && meta.fichajes_futuros.length > 0;
 
-  // Fichar (FormData sin Content-Type manual; usa fetch directo para no tocar api.js)
+  // Fichar (FormData + auto-refresh con api.postForm)
   const fichar = async (tipo) => {
     if (tieneFuturos) {
       toast.error('⛔ Fichaje bloqueado por fichajes futuros. Corrige primero.');
@@ -98,22 +94,13 @@ export default function EmpleadoPanel({ session, onLogout }) {
       const form = new FormData();
       form.append('tipo', tipo);
 
-      const res = await fetch(`${API_URL}/fichar`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}` }, // NO pongas Content-Type con FormData
-        body: form,
-      });
+      await api.postForm('/fichar', form, token);
 
-      const body = await parseMaybeJson(res);
-      if (!res.ok) {
-        const msgBody = body?.detail || body?.message || (typeof body === 'string' ? body : '');
-        toast.error(`❌ ${res.status} ${res.statusText}${msgBody ? ` – ${msgBody}` : ''}`);
-        return;
-      }
       toast.success(tipo === 'entrada' ? '✅ Entrada registrada' : '✅ Salida registrada');
       await cargarResumenFichajes();
+      bumpSaldo(); // refresca widget de saldo
     } catch (e) {
-      toast.error(`🌐 Error de red al fichar${e?.message ? `: ${e.message}` : ''}`);
+      toast.error(`❌ ${e?.message || 'Error al fichar'}`);
     } finally {
       setLoadingFichar(false);
     }
@@ -246,9 +233,9 @@ export default function EmpleadoPanel({ session, onLogout }) {
             </div>
           </section>
 
-          {/* === Atajos Ausencias & Vacaciones === */}
+          {/* === Atajos Ausencias & Vacaciones + Saldo === */}
           <section className="rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow p-5">
-            <div className="flex items-center justify-between">
+            <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-[#004B87]">Ausencias y Vacaciones</h3>
               <div className="flex gap-2">
                 <button
@@ -265,6 +252,8 @@ export default function EmpleadoPanel({ session, onLogout }) {
                 </button>
               </div>
             </div>
+            {/* Widget de saldo; se refresca tras fichar via key */}
+            <SaldoVacacionesWidget key={saldoRefreshKey} />
           </section>
 
           {/* === Solicitud de fichaje manual === */}
