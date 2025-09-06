@@ -58,7 +58,7 @@ export default function SolicitarAusenciaForm({ token, emailUsuario }) {
       .reglas(token)
       .then((r) => mounted && setRules(r?.rules || []))
       .catch(() => mounted && setRules([]));
-    return () => (mounted = false);
+    return () => { mounted = false; };
   }, [token]);
 
   // Cuando cambie tipo → reset de subtipo y defaults del tipo
@@ -67,6 +67,11 @@ export default function SolicitarAusenciaForm({ token, emailUsuario }) {
     setSubtipo(subs[0] || null);
     setParcial(Boolean(tipo.fixed?.parcial));
     setRetribuida(tipo.fixed?.retribuida ?? true);
+    // Reset de horas si el tipo fuerza no-parcial
+    if (tipo.modelTipo === "VACACIONES") {
+      setHoraInicio("");
+      setHoraFin("");
+    }
   }, [tipo]);
 
   // Cuando cambie subtipo → aplicar defaults/sugerencias del subtipo
@@ -110,23 +115,34 @@ export default function SolicitarAusenciaForm({ token, emailUsuario }) {
     setValError("");
     setCheck(null);
 
-    if (!fechaInicio || !fechaFin) return;
-    if (new Date(`${fechaFin}T00:00:00`) < new Date(`${fechaInicio}T00:00:00`)) {
+    const rangoInvalido =
+      !!fechaInicio &&
+      !!fechaFin &&
+      new Date(`${fechaFin}T00:00:00`) < new Date(`${fechaInicio}T00:00:00`);
+
+    if (rangoInvalido) {
       setValError("El rango de fechas es inválido (hasta < desde).");
       return;
     }
 
-    // Si el tipo no permite medio día, fuerza parcial=false
-    if (parcial && (tipo.modelTipo === "VACACIONES" || !reglaTipo?.permite_mediodia)) {
+    // Si el tipo no permite medio día o el rango es multi-día, forzamos no-parcial
+    const esMultiDia = !!fechaInicio && !!fechaFin && fechaInicio !== fechaFin;
+    if (
+      parcial &&
+      (tipo.modelTipo === "VACACIONES" || !reglaTipo?.permite_mediodia || esMultiDia)
+    ) {
       setParcial(false);
       return;
     }
+
+    if (!fechaInicio || !fechaFin) return;
 
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(async () => {
       setChecking(true);
       try {
         const res = await ausenciasService.validar(token, {
+          usuario_email: emailUsuario,  // explícito
           tipo: tipo.modelTipo,
           desde: fechaInicio,
           hasta: fechaFin,
@@ -144,11 +160,9 @@ export default function SolicitarAusenciaForm({ token, emailUsuario }) {
     }, 300);
 
     return () => debounceRef.current && clearTimeout(debounceRef.current);
-  }, [token, tipo.modelTipo, fechaInicio, fechaFin, parcial, reglaTipo]);
+  }, [token, emailUsuario, tipo.modelTipo, fechaInicio, fechaFin, parcial, reglaTipo]);
 
   // ===== cálculos derivados =====
-  const theme = TIPO_THEME[tipo.modelTipo];
-
   const horasParciales = React.useMemo(() => {
     if (!parcial || !horaInicio || !horaFin) return 0;
     const [h1, m1] = horaInicio.split(":").map(Number);
@@ -183,6 +197,7 @@ export default function SolicitarAusenciaForm({ token, emailUsuario }) {
     if (new Date(`${fechaFin}T00:00:00`) < new Date(`${fechaInicio}T00:00:00`)) return "La fecha fin no puede ser anterior a la de inicio.";
     if (tipo.modelTipo === "VACACIONES" && parcial) return "Las vacaciones no pueden ser parciales.";
     if (parcial) {
+      if (fechaInicio !== fechaFin) return "Las ausencias parciales deben ser en un único día.";
       if (!horaInicio || !horaFin) return "Indica hora inicio y hora fin.";
       if (horaFin <= horaInicio) return "La hora fin debe ser mayor que la hora inicio.";
       if (reglaTipo && !reglaTipo.permite_mediodia) return "El convenio no permite medio día para este tipo.";
@@ -204,6 +219,7 @@ export default function SolicitarAusenciaForm({ token, emailUsuario }) {
     try {
       setChecking(true);
       const res = await ausenciasService.validar(token, {
+        usuario_email: emailUsuario,  // explícito
         tipo: tipo.modelTipo,
         desde: fechaInicio,
         hasta: fechaFin,
@@ -264,6 +280,7 @@ export default function SolicitarAusenciaForm({ token, emailUsuario }) {
 
   const subopts = SUBTIPOS[tipo.modelTipo] || [];
   const permiteMedio = !!reglaTipo?.permite_mediodia && tipo.modelTipo !== "VACACIONES";
+  const disableParcialByRange = !!fechaInicio && !!fechaFin && fechaInicio !== fechaFin;
 
   return (
     <form onSubmit={onSubmit} className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -271,6 +288,7 @@ export default function SolicitarAusenciaForm({ token, emailUsuario }) {
       <div className="rounded-2xl bg-white/55 backdrop-blur-xl border border-white/50 shadow p-5 space-y-4">
         <div className="flex items-center gap-2">
           <span className={`h-2.5 w-2.5 rounded-full ${TIPO_THEME[tipo.modelTipo]?.dot || "bg-slate-400"}`} />
+        {/* eslint-disable-next-line react/no-unescaped-entities */}
           <h3 className="text-lg font-semibold text-slate-900">Solicitar Ausencia o Vacaciones</h3>
         </div>
 
@@ -334,13 +352,22 @@ export default function SolicitarAusenciaForm({ token, emailUsuario }) {
 
         {/* Parcial / Retribuida */}
         <div className="flex flex-wrap items-center gap-6">
-          <label className="inline-flex items-center gap-2" title={permiteMedio ? "" : "El convenio o el tipo no permite medio día"}>
+          <label
+            className="inline-flex items-center gap-2"
+            title={
+              !permiteMedio
+                ? "El convenio o el tipo no permite medio día"
+                : disableParcialByRange
+                ? "Parciales solo se permiten en un único día"
+                : ""
+            }
+          >
             <input
               type="checkbox"
               className="accent-indigo-600"
               checked={parcial}
               onChange={(e) => setParcial(e.target.checked)}
-              disabled={!permiteMedio}
+              disabled={!permiteMedio || disableParcialByRange}
             />
             <span className="text-sm">Parcial</span>
           </label>

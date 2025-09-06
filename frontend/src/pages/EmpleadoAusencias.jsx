@@ -7,7 +7,7 @@ import MisAusencias from "../components/empleado/MisAusencias";
 import AusenciasCalendario from "../components/empleado/AusenciasCalendario";
 
 import { ausenciasService } from "../services/ausencias";
-import { API_URL } from "../services/api";
+import { API_URL, doLogout } from "../services/api";
 
 // Header global reutilizado (mismo que admin)
 import Header from "../components/shared/Header";
@@ -31,8 +31,12 @@ export default function EmpleadoAusencias({ session }) {
   const [misAusencias, setMisAusencias] = useState([]);
   const [cargando, setCargando] = useState(false);
 
-  // Raíz del backend sin barra final (para pasar al calendario)
-  const apiRoot = useMemo(() => (API_URL || "").replace(/\/$/, ""), []);
+  // Raíz del backend SIN /api ni barra final (el componente añade /api/…)
+  const apiRoot = useMemo(() => {
+    return (API_URL || "")
+      .replace(/\/+$/, "")     // sin barra final
+      .replace(/\/api$/i, ""); // sin sufijo /api
+  }, []);
 
   const goTab = (t) => {
     setTab(t);
@@ -51,15 +55,16 @@ export default function EmpleadoAusencias({ session }) {
       setMisAusencias(Array.isArray(datos) ? datos : []);
     } catch (err) {
       console.error("Error cargando ausencias:", err);
+      setMisAusencias([]);
     } finally {
       setCargando(false);
     }
   }
 
-  function handleLogout() {
+  async function handleLogout() {
     try {
-      sessionStorage.removeItem("token");
-    } finally {
+      await doLogout(); // limpia tokens + redirige a /login
+    } catch {
       navigate("/login");
     }
   }
@@ -84,7 +89,7 @@ export default function EmpleadoAusencias({ session }) {
     >
       <div className="pointer-events-none absolute inset-x-0 top-0 h-20 bg-gradient-to-b from-black/10 to-transparent" />
 
-      <Header usuario={user} onLogout={handleLogout} />
+      <Header usuario={emailUsuario} onLogout={handleLogout} />
 
       <main className="max-w-6xl mx-auto px-6 py-8 space-y-6">
         {/* Encabezado de sección */}

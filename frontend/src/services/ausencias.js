@@ -1,111 +1,76 @@
 // src/services/ausencias.js
-import { api } from "../services/api"; // mantiene tu wrapper actual
+import { api } from "./api";
 
-// -------- helpers internos --------
-function getToken(t) {
-  try {
-    return t || (typeof localStorage !== "undefined" ? localStorage.getItem("access_token") : null);
-  } catch {
-    return t || null;
-  }
-}
+// —— helpers de querystring
 function qs(params = {}) {
-  const u = new URLSearchParams();
+  const q = new URLSearchParams();
   Object.entries(params).forEach(([k, v]) => {
-    if (v === undefined || v === null || v === "") return;
-    u.set(k, String(v));
+    if (v !== undefined && v !== null && v !== "") q.set(k, v);
   });
-  const s = u.toString();
+  const s = q.toString();
   return s ? `?${s}` : "";
 }
 
-/**
- * Servicio de Ausencias
- * Todas las funciones aceptan el token como PRIMER parámetro para ser compatibles con tu código existente.
- * El token es OPCIONAL: si no lo pasas, se lee de localStorage ("access_token").
- */
+/** Balance de ausencias para el usuario autenticado (o el indicado). */
+export function getBalance(token, { user_id, email, year } = {}) {
+  return api.get(`/ausencias/balance${qs({ user_id, email, year })}`, token);
+}
+
+/** Reglas de convenio aplicables al usuario autenticado (o el indicado). */
+export function reglas(token, { user_id, email, year } = {}) {
+  return api.get(`/ausencias/reglas${qs({ user_id, email, year })}`, token);
+}
+
+/** Movimientos del “ledger” de saldos. */
+export function movimientos(token, { user_id, email, limit = 100 } = {}) {
+  return api.get(`/ausencias/movimientos${qs({ user_id, email, limit })}`, token);
+}
+
+/** Valida una solicitud antes de crearla. */
+export function validar(token, body) {
+  return api.post(`/ausencias/validar`, body, token);
+}
+
+/** Crea una ausencia (usa alias /crear por compatibilidad). */
+export function crear(token, payload) {
+  return api.post(`/ausencias/crear`, payload, token);
+}
+
+/** Listados y acciones de gestión */
+export function listarMiasPorEmail(token, email) {
+  return api.get(`/ausencias${qs({ usuario_email: email })}`, token);
+}
+
+export function listarTodas(token, filtros = {}) {
+  return api.get(`/ausencias${qs(filtros)}`, token);
+}
+
+export function aprobar(token, id) {
+  // POST sin body
+  return api.post(`/ausencias/${id}/aprobar`, null, token);
+}
+
+export function rechazar(token, id /*, motivoRechazo */) {
+  // POST sin body (el backend actual no espera motivo)
+  return api.post(`/ausencias/${id}/rechazar`, null, token);
+}
+
+export function eliminar(token, id) {
+  return api.delete(`/ausencias/${id}`, token);
+}
+
+// API agrupada por comodidad
 export const ausenciasService = {
-  // ---------- CRUD básico existente ----------
-
-  crear(token, payload) {
-    return api.post("/ausencias", getToken(token), payload);
-  },
-
-  // Nuevo preferido: usa la ruta /ausencias/mias del backend
-  listarMias(token) {
-    return api.get("/ausencias/mias", getToken(token));
-  },
-
-  // Mantengo el que ya tenías (aunque es mejor listarMias()):
-  listarMiasPorEmail(token, email) {
-    return api.get(`/ausencias${qs({ usuario_email: email })}`, getToken(token));
-  },
-
-  // Listado general con filtros
-  listarTodas(token, { usuario_email, estado, tipo, desde, hasta } = {}) {
-    return api.get(
-      `/ausencias${qs({ usuario_email, estado, tipo, desde, hasta })}`,
-      getToken(token)
-    );
-  },
-
-  aprobar(token, id) {
-    return api.post(`/ausencias/${id}/aprobar`, getToken(token));
-  },
-
-  // OJO: tu backend actual NO recibe "motivo" en esta ruta. Lo ignoro y aviso.
-  rechazar(token, id, motivoRechazo) {
-    if (motivoRechazo) {
-      // eslint-disable-next-line no-console
-      console.warn("ausenciasService.rechazar(): el backend no acepta 'motivo' en esta ruta; se ignora.");
-    }
-    return api.post(`/ausencias/${id}/rechazar`, getToken(token));
-  },
-
-  // ATENCIÓN: en tu backend NO hay DELETE /ausencias/{id}. Si lo llamas, obtendrás 404.
-  eliminar(token, id) {
-    return api.delete(`/ausencias/${id}`, getToken(token));
-  },
-
-  // ---------- NUEVOS ENDPOINTS (read-only + validar) ----------
-
-  /**
-   * GET /api/ausencias/balance
-   * @param {{userId?: number, year?: number, email?: string}} params
-   */
-  balance(token, { userId, year, email } = {}) {
-    return api.get(`/ausencias/balance${qs({ user_id: userId, year, email })}`, getToken(token));
-  },
-
-  /**
-   * GET /api/ausencias/reglas
-   * @param {{userId?: number, year?: number, email?: string}} params
-   */
-  reglas(token, { userId, year, email } = {}) {
-    return api.get(`/ausencias/reglas${qs({ user_id: userId, year, email })}`, getToken(token));
-  },
-
-  /**
-   * GET /api/ausencias/movimientos
-   * @param {{userId?: number, limit?: number, email?: string}} params
-   */
-  movimientos(token, { userId, limit = 100, email } = {}) {
-    return api.get(`/ausencias/movimientos${qs({ user_id: userId, limit, email })}`, getToken(token));
-  },
-
-  /**
-   * POST /api/ausencias/validar
-   * @param {{tipo: string, desde: string, hasta: string, medio_dia?: boolean, userId?: number, email?: string}} payload
-   */
-  validar(token, { tipo, desde, hasta, medio_dia = false, userId, email }) {
-    const body = {
-      tipo,
-      desde,
-      hasta,
-      medio_dia,
-      ...(userId ? { usuario_id: userId } : {}),
-      ...(email ? { usuario_email: email } : {}),
-    };
-    return api.post("/ausencias/validar", getToken(token), body);
-  },
+  getBalance,
+  reglas,
+  movimientos,
+  validar,
+  crear,
+  listarMiasPorEmail,
+  listarTodas,
+  aprobar,
+  rechazar,
+  eliminar,
 };
+
+export default ausenciasService;
