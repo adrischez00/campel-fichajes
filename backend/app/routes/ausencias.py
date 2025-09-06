@@ -20,14 +20,12 @@ router = APIRouter(prefix="/ausencias", tags=["Ausencias"])
 # Validaciones / helpers
 # =========================
 def _validar_payload_creacion(data: AusenciaCreate):
-    # Día completo: horas deben venir vacías
     if not data.parcial:
         if data.hora_inicio is not None or data.hora_fin is not None:
             raise HTTPException(status_code=400, detail="Para día completo, hora_inicio y hora_fin deben ser NULL.")
         if data.fecha_fin < data.fecha_inicio:
             raise HTTPException(status_code=400, detail="fecha_fin no puede ser anterior a fecha_inicio.")
     else:
-        # Parcial: horas obligatorias y rango consistente
         if data.hora_inicio is None or data.hora_fin is None:
             raise HTTPException(status_code=400, detail="En ausencias parciales, hora_inicio y hora_fin son obligatorias.")
         if (data.fecha_fin == data.fecha_inicio) and (data.hora_fin <= data.hora_inicio):
@@ -37,7 +35,7 @@ def _validar_payload_creacion(data: AusenciaCreate):
 
 
 # =========================
-# Endpoints CRUD existentes
+# Endpoints CRUD
 # =========================
 @router.post("", response_model=AusenciaOut, status_code=status.HTTP_201_CREATED)
 def crear(
@@ -46,13 +44,9 @@ def crear(
     current_user: User = Depends(get_current_user),
 ):
     _validar_payload_creacion(data)
-
-    # Permisos: empleado solo puede crear para sí mismo
     if current_user.role not in ("admin", "manager") and data.usuario_email != current_user.email:
         raise HTTPException(status_code=403, detail="No autorizado a crear ausencias para otros usuarios.")
-
-    ausencia = crud.crear_ausencia(db, data, creador_email=current_user.email)
-    return ausencia
+    return crud.crear_ausencia(db, data, creador_email=current_user.email)
 
 
 @router.get("", response_model=List[AusenciaOut])
@@ -65,13 +59,10 @@ def listar(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Empleado: solo sus ausencias. Admin/manager: cualquier usuario.
     if current_user.role not in ("admin", "manager"):
         usuario_email = current_user.email
-
     if desde and hasta and hasta < desde:
         raise HTTPException(status_code=400, detail="El rango de fechas es inválido (hasta < desde).")
-
     return crud.listar_ausencias(db, usuario_email, estado, tipo, desde, hasta)
 
 
@@ -84,13 +75,10 @@ def actualizar(
 ):
     if current_user.role not in ("admin", "manager"):
         raise HTTPException(status_code=403, detail="No autorizado")
-
-    # Validaciones suaves si modifica fechas/horas
     if data.fecha_inicio and data.fecha_fin and data.fecha_fin < data.fecha_inicio:
         raise HTTPException(status_code=400, detail="fecha_fin no puede ser anterior a fecha_inicio.")
     if (data.hora_inicio is not None) ^ (data.hora_fin is not None):
         raise HTTPException(status_code=400, detail="Si se indica hora_inicio u hora_fin, deben indicarse ambas.")
-
     aus = crud.actualizar_ausencia(db, ausencia_id, data)
     if not aus:
         raise HTTPException(status_code=404, detail="Ausencia no encontrada")
@@ -125,21 +113,17 @@ def rechazar(
     return aus
 
 
-# === ALIAS: POST /ausencias/crear ===
+# === Alias front: POST /ausencias/crear ===
 @router.post("/crear", response_model=AusenciaOut, status_code=status.HTTP_201_CREATED)
 def crear_alias(
     data: AusenciaCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # ---- permisos ----
     if current_user.role not in ("admin", "manager") and data.usuario_email != current_user.email:
         raise HTTPException(status_code=403, detail="No autorizado a crear ausencias para otros usuarios.")
-
-    # ---- validaciones de payload ----
     _validar_payload_creacion(data)
 
-    # ---- control de solapes con ausencias ya registradas ----
     posibles_solapes = db.query(Ausencia).filter(
         Ausencia.usuario_email == data.usuario_email,
         Ausencia.estado.in_(["APROBADA", "PENDIENTE"]),
@@ -148,10 +132,8 @@ def crear_alias(
     ).all()
 
     def _hay_solape_horas(a: Ausencia, b_parcial: bool, b_fi, b_hi, b_ff, b_hf) -> bool:
-        # Si alguno es de día completo, consideramos que solapa.
         if not a.parcial or not b_parcial:
             return True
-        # Si mismo día: comprobar horas
         if a.fecha_inicio == a.fecha_fin == b_fi == b_ff:
             ai = a.hora_inicio or _time.min
             af = a.hora_fin or _time.max
@@ -167,7 +149,6 @@ def crear_alias(
                 detail=f"Existe una ausencia {a.estado.lower()} que solapa con el rango indicado (id={a.id})."
             )
 
-    # ---- crear ----
     return crud.crear_ausencia(db, data, creador_email=current_user.email)
 
 
@@ -180,9 +161,8 @@ def mis_ausencias(
 
 
 # =========================
-# NUEVOS ENDPOINTS READ-ONLY (balance/reglas/movimientos/validar)
+# ENDPOINTS: balance / reglas / movimientos / validar
 # =========================
-
 class _BalanceItem(BaseModel):
     tipo: str
     computo: str
@@ -237,7 +217,6 @@ class _ValidateResponse(BaseModel):
 
 
 def _resolver_usuario(db: Session, uid: Optional[int], email: Optional[str], fallback: User) -> tuple[int, str]:
-    """Devuelve (id, email) resolviendo por id o email; si no, usa el usuario autenticado."""
     if uid is not None:
         row = db.execute(text("SELECT id, email FROM users WHERE id=:id"), {"id": uid}).first()
         if row:
@@ -260,28 +239,35 @@ def balance(
     uid, uemail = _resolver_usuario(db, user_id, email, me)
     anio = year or date.today().year
 
-    # Usamos REGLAS del convenio para enumerar tipos del usuario.
-    sql = text("""
-        WITH u AS (SELECT :uid::int AS id, :uemail::text AS email),
-        tipos AS (
-            SELECT r.tipo::text AS tipo
-            FROM reglas_ausencia r
-            JOIN usuarios_convenio uc ON uc.convenio_id = r.convenio_id
-            WHERE uc.usuario_id = :uid
-        )
-        SELECT r.*
-        FROM u, tipos t,
-             LATERAL public.resumen_ausencia_anual(u.email, :anio, t.tipo) AS r
-        ORDER BY r.tipo
+    # 1) Tipos candidatos = REGLAS del convenio ∪ tipos con saldo del año
+    tipos_sql = text("""
+        SELECT DISTINCT r.tipo::text AS tipo
+        FROM reglas_ausencia r
+        JOIN usuarios_convenio uc ON uc.convenio_id = r.convenio_id
+        WHERE uc.usuario_id = :uid
+      UNION
+        SELECT DISTINCT s.tipo::text
+        FROM saldos_ausencia s
+        WHERE s.usuario_id = :uid AND s.anio = :anio
+        ORDER BY 1
     """)
+    tipos = [row["tipo"] for row in db.execute(tipos_sql, {"uid": uid, "anio": anio}).mappings().all()]
 
-    try:
-        rows = db.execute(sql, {"uid": uid, "uemail": uemail, "anio": anio}).mappings().all()
-    except Exception as e:
-        # Devuelve detalle para poder diagnosticar desde el front
-        raise HTTPException(status_code=500, detail=f"balance_sql_error: {e}")
+    # 2) Llamamos a la función por cada tipo, aislando errores por tipo
+    items: List[_BalanceItem] = []
+    for t in tipos:
+        try:
+            rec = db.execute(
+                text("SELECT * FROM public.resumen_ausencia_anual(:email, :anio, :tipo)"),
+                {"email": uemail, "anio": anio, "tipo": t},
+            ).mappings().first()
+            if rec:
+                items.append(_BalanceItem(**rec))
+        except Exception as e:
+            # No paramos toda la respuesta por un tipo problemático
+            print(f"[ausencias.balance] fallo en tipo={t!r}: {e}")
 
-    return _BalanceResponse(user_id=uid, anio=anio, saldos=[_BalanceItem(**r) for r in rows])
+    return _BalanceResponse(user_id=uid, anio=anio, saldos=items)
 
 
 @router.get("/reglas", response_model=_ReglasResponse)
@@ -353,7 +339,6 @@ def validar(
     computo = rule["computo"]
     permite_mediodia = bool(rule["permite_mediodia"])
 
-    # Días solicitados
     if body.medio_dia:
         requested = 0.5
     else:
