@@ -208,3 +208,21 @@ export async function doLogout() {
   storage.clear();
   if (typeof window !== "undefined") window.location.href = "/login";
 }
+
+// ===== Helpers de Calendario (compat con AusenciasCalendario.jsx) =====
+export function fetchUserCalendarEvents(_userId, start, end, token = null, signal) {
+  const qs = new URLSearchParams({ start, end }).toString();
+  return api.get(`/calendar/events?${qs}`, token, {}, signal);
+}
+export function fetchWorkingDays(userId, start, end, token = null, signal) {
+  const qs = new URLSearchParams({ start, end }).toString();
+  return api.get(`/calendar/users/${userId}/working-days?${qs}`, token, {}, signal);
+}
+export function fetchWorkingDaysMe(start, end, token = null, signal) {
+  const qs = new URLSearchParams({ start, end }).toString();
+  return api.get(`/calendar/working-days?${qs}`, token, {}, signal);
+}
+export function fetchUserWorkingDays(...args) {
+  // alias usado por AusenciasCalendario.jsx
+  return fetchWorkingDays(...args);
+}
