@@ -37,27 +37,27 @@ def health():
 app.add_api_route("/api/health", health, methods=["GET"])
 
 # ---------------- CORS (Cloudflare Pages + previews + localhost) ----------------
+from fastapi.middleware.cors import CORSMiddleware
+
 STATIC_ALLOWED = [
     "https://sistema-fichajes.pages.dev",
     "https://campel-fichajes.pages.dev",
 ]
 
-# Override por env para previews (útil si cambias de proveedor/host)
-DEFAULT_PREVIEWS_REGEX = r"^https://[a-z0-9-]+\.(sistema-fichajes|campel-fichajes)\.pages\.dev$"
+# Regex para previews de Cloudflare Pages (subdominios tipo main--xxxx.pages.dev)
+DEFAULT_PREVIEWS_REGEX = r"^https://[a-z0-9-]+--(sistema-fichajes|campel-fichajes)\.pages\.dev$"
 PAGES_PREVIEWS_REGEX = os.getenv("ALLOW_ORIGIN_REGEX", DEFAULT_PREVIEWS_REGEX)
 
-# Local dev (Vite dev/preview/otros). Se puede anular con ALLOW_LOCALHOST=0
 ALLOW_LOCALHOST = os.getenv("ALLOW_LOCALHOST", "1") not in ("0", "false", "False")
 LOCALHOST_ALLOWED = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
-    "http://localhost:4173",     # vite preview
+    "http://localhost:4173",
     "http://127.0.0.1:4173",
     "http://localhost:3000",
     "http://127.0.0.1:3000",
 ]
 
-# Orígenes extra por env (coma-separado)
 extra = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
 ALLOWED_ORIGINS = list(dict.fromkeys(STATIC_ALLOWED + (LOCALHOST_ALLOWED if ALLOW_LOCALHOST else []) + extra))
 
@@ -65,11 +65,13 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_origin_regex=PAGES_PREVIEWS_REGEX,
-    allow_credentials=True,   # si usas cookies httpOnly para refresh
-    allow_methods=["*"],
-    allow_headers=["*"],
-    max_age=600,              # reduce preflights repetidos
+    allow_credentials=True,                          # ← cookies httpOnly / Authorization
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    expose_headers=["Content-Disposition"],          # opcional (para descargas)
+    max_age=600,
 )
+
 
 # ---------------- Modelos de entrada ----------------
 class SolicitudManualIn(BaseModel):
