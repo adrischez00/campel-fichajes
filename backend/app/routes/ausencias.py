@@ -82,7 +82,6 @@ def actualizar(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Solo admin/manager o el creador (si quieres permitirlo). Aquí restringimos a admin/manager.
     if current_user.role not in ("admin", "manager"):
         raise HTTPException(status_code=403, detail="No autorizado")
 
@@ -133,18 +132,11 @@ def crear_alias(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """
-    Alias de creación para front: POST /ausencias/crear
-    - Empleado solo puede crear para sí mismo.
-    - Admin/Manager pueden crear para cualquiera.
-    - Valida coherencia de fechas/horas.
-    - Bloquea solape con ausencias APROBADAS/PENDIENTES.
-    """
     # ---- permisos ----
     if current_user.role not in ("admin", "manager") and data.usuario_email != current_user.email:
         raise HTTPException(status_code=403, detail="No autorizado a crear ausencias para otros usuarios.")
 
-    # ---- validaciones de payload (mismas reglas que en el POST base) ----
+    # ---- validaciones de payload ----
     _validar_payload_creacion(data)
 
     # ---- control de solapes con ausencias ya registradas ----
@@ -191,7 +183,6 @@ def mis_ausencias(
 # NUEVOS ENDPOINTS READ-ONLY (balance/reglas/movimientos/validar)
 # =========================
 
-# ---- modelos locales para respuesta (no tocamos schemas existentes) ----
 class _BalanceItem(BaseModel):
     tipo: str
     computo: str
@@ -269,19 +260,27 @@ def balance(
     uid, uemail = _resolver_usuario(db, user_id, email, me)
     anio = year or date.today().year
 
+    # Usamos REGLAS del convenio para enumerar tipos del usuario.
     sql = text("""
-    WITH u AS (SELECT :uid::int AS id, :uemail::text AS email),
-    t AS (
-      SELECT s.tipo::text AS tipo
-      FROM saldos_ausencia s
-      WHERE s.usuario_id = :uid AND s.anio = :anio
-    )
-    SELECT r.*
-    FROM u, t,
-         LATERAL public.resumen_ausencia_anual(u.email, :anio, t.tipo) AS r
-    ORDER BY r.tipo
+        WITH u AS (SELECT :uid::int AS id, :uemail::text AS email),
+        tipos AS (
+            SELECT r.tipo::text AS tipo
+            FROM reglas_ausencia r
+            JOIN usuarios_convenio uc ON uc.convenio_id = r.convenio_id
+            WHERE uc.usuario_id = :uid
+        )
+        SELECT r.*
+        FROM u, tipos t,
+             LATERAL public.resumen_ausencia_anual(u.email, :anio, t.tipo) AS r
+        ORDER BY r.tipo
     """)
-    rows = db.execute(sql, {"uid": uid, "uemail": uemail, "anio": anio}).mappings().all()
+
+    try:
+        rows = db.execute(sql, {"uid": uid, "uemail": uemail, "anio": anio}).mappings().all()
+    except Exception as e:
+        # Devuelve detalle para poder diagnosticar desde el front
+        raise HTTPException(status_code=500, detail=f"balance_sql_error: {e}")
+
     return _BalanceResponse(user_id=uid, anio=anio, saldos=[_BalanceItem(**r) for r in rows])
 
 
