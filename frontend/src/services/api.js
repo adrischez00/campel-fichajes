@@ -1,19 +1,16 @@
 // src/services/api.js
 
-// ===== Configuración base =====
+// === BASE URL (forzar https si la app va en https) ===
 const API_URL_RAW = (import.meta.env.VITE_API_URL || "http://localhost:8000").replace(/\/$/, "");
 export const API_URL =
   (typeof window !== "undefined" && window.location.protocol === "https:")
     ? API_URL_RAW.replace(/^http:\/\//, "https://")
     : API_URL_RAW;
 
-// Cookies httpOnly para refresh (recomendado mantener en true si usas cookie de refresh)
-const USE_CREDENTIALS = true;
+// === Cookies httpOnly para refresh ===
+const USE_CREDENTIALS = true; // imprescindible para enviar/recibir la cookie refresh
 
-// Timeout (ms) para evitar requests colgados
-const HTTP_TIMEOUT_MS = Number(import.meta.env?.VITE_HTTP_TIMEOUT_MS ?? 15000);
-
-// ===== Utilidades base =====
+// --- utils ---
 function normalizePath(endpoint) {
   if (!endpoint) return "/";
   return endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
@@ -29,16 +26,16 @@ function assertNoMixedContent() {
   }
 }
 
-/** Ensambla BASE + path sin duplicar /api */
-export function join(path = "") {
+// Ensambla BASE + path sin duplicar /api
+function join(path = "") {
   const BASE = API_URL.replace(/\/+$/, "");
   let p = normalizePath(path);
   if (BASE.endsWith("/api") && p.startsWith("/api/")) p = p.slice(4);
   return BASE + p;
 }
 
-// ===== Almacenamiento de access token =====
-const ACCESS_KEYS = ["access", "access_token", "token"]; // claves compatibles
+// ====== Almacenamiento de access token ======
+const ACCESS_KEYS = ["access", "access_token", "token"]; // compat
 const storage = {
   get() {
     let v = null;
@@ -67,27 +64,27 @@ const storage = {
     }
   },
 };
+
 export const getAccessToken = () => storage.get();
 
-// ===== Cabeceras =====
-function buildHeaders(extraHeaders = {}, token, willSendJsonBody) {
+// ====== Cabeceras ======
+function buildHeaders(extraHeaders = {}, token, addJsonContentType) {
   const headers = { ...extraHeaders };
   const t = token ?? storage.get();
   if (t) headers.Authorization = `Bearer ${t}`;
-  if (willSendJsonBody && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
-  if (!headers["Accept"]) headers["Accept"] = "application/json";
+  if (addJsonContentType && !headers["Content-Type"]) headers["Content-Type"] = "application/json";
   return headers;
 }
 
-// ===== Refresh concurrente (cola) =====
+// ====== Refresh ======
 let refreshing = false;
-let waiters = []; // resolvers que esperan al refresh
+let waiters = [];
 
 async function refreshAccess() {
   const url = join("/auth/refresh");
   const opts = {
     method: "POST",
-    credentials: "include", // cookie httpOnly
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
   };
   const res = await fetch(url, opts);
@@ -95,85 +92,57 @@ async function refreshAccess() {
     storage.clear();
     throw new Error("No se pudo refrescar la sesión");
   }
-  // Permitir 204 sin cuerpo y tratarlo como error
-  let data = null;
-  try { data = await res.json(); } catch { /* sin cuerpo */ }
+  const data = await res.json();
   const newAccess = data?.access_token;
-  if (!newAccess) {
-    storage.clear();
-    throw new Error("Refresh sin access_token");
-  }
-  storage.set(newAccess); // por defecto sessionStorage
+  if (!newAccess) throw new Error("Refresh sin access_token");
+  storage.set(newAccess);
   return newAccess;
 }
 
-// ===== Helpers de parseo de respuesta/errores =====
 async function safeErrorText(res) {
   try {
-    const ct = (res.headers.get("content-type") || "").toLowerCase();
-    if (ct.includes("application/json")) {
-      const j = await res.json();
-      return j?.detail || j?.message || JSON.stringify(j);
-    }
-    return await res.text();
+    const j = await res.json();
+    return j?.detail || JSON.stringify(j);
   } catch {
-    return null;
+    try { return await res.text(); } catch { return null; }
   }
 }
 
 async function parseBody(res) {
   if (res.status === 204) return null;
-  const ct = (res.headers.get("content-type") || "").toLowerCase();
-  if (ct.includes("application/json")) {
-    return res.json();
-  }
-  const txt = await res.text();
-  try { return txt ? JSON.parse(txt) : null; } catch { return txt || null; }
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
 }
 
-// ===== Core request JSON con auto-refresh + timeout =====
-async function request(method, endpoint, { body, token = null, headers = {}, signal } = {}) {
+// ====== Core request con auto-refresh ======
+async function request(method, endpoint, { body, token = null, headers = {}, signal, retry = false } = {}) {
   assertNoMixedContent();
 
   const url = join(endpoint);
-  const willSendJsonBody = body !== undefined && body !== null && method !== "GET" && method !== "HEAD" && !(body instanceof FormData);
-  const finalHeaders = buildHeaders(headers, token, willSendJsonBody);
 
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(new DOMException("Timeout", "AbortError")), HTTP_TIMEOUT_MS);
+  // FormData detection para no forzar JSON ni Content-Type
+  const isFormData = (typeof FormData !== "undefined") && body instanceof FormData;
+  const willSendBody = body !== undefined && body !== null && method !== "GET" && method !== "HEAD";
 
-  const opts = {
-    method,
-    headers: finalHeaders,
-    credentials: USE_CREDENTIALS ? "include" : "same-origin",
-    signal: signal || ac.signal,
-  };
-  if (willSendJsonBody) opts.body = typeof body === "string" ? body : JSON.stringify(body);
-  if (body instanceof FormData) opts.body = body; // (por si alguien llama request con FormData)
+  const finalHeaders = buildHeaders(headers, token, willSendBody && !isFormData);
 
-  let res;
-  try {
-    res = await fetch(url, opts);
-  } catch (e) {
-    clearTimeout(t);
-    const err = new Error(e?.name === "AbortError" ? "Solicitud agotada (timeout)" : "Error de red");
-    err.code = e?.name === "AbortError" ? "TIMEOUT" : "NETWORK";
-    err.cause = e;
-    throw err;
+  const opts = { method, headers: finalHeaders, signal };
+  if (willSendBody) {
+    opts.body = isFormData ? body : (typeof body === "string" ? body : JSON.stringify(body));
   }
-  clearTimeout(t);
+  if (USE_CREDENTIALS) opts.credentials = "include";
 
-  // Auto-refresh 401 (una sola vez por llamada)
-  if (res.status === 401) {
-    // Colapsar refresh en curso
+  const res = await fetch(url, opts);
+
+  if (res.status === 401 && !retry) {
     if (!refreshing) {
       refreshing = true;
       try {
-        const newAccess = await refreshAccess();
-        waiters.forEach((resolve) => resolve(newAccess));
+        await refreshAccess();
+        waiters.forEach((resume) => resume());
         waiters = [];
       } catch (err) {
-        waiters.forEach((resolve) => resolve(null));
+        waiters.forEach((resume) => resume());
         waiters = [];
         refreshing = false;
         if (typeof window !== "undefined") window.location.href = "/login";
@@ -184,117 +153,29 @@ async function request(method, endpoint, { body, token = null, headers = {}, sig
     } else {
       await new Promise((resolve) => waiters.push(resolve));
     }
-
-    // Reintentar con el token actual del storage
-    const tokenAfter = storage.get();
-    const retryHeaders = buildHeaders(headers, tokenAfter, willSendJsonBody);
-    const retryOpts = {
-      ...opts,
-      headers: retryHeaders,
-    };
-    const res2 = await fetch(url, retryOpts);
+    // Reintento 1 vez
+    const retriedHeaders = buildHeaders(headers, storage.get(), willSendBody && !isFormData);
+    const retriedOpts = { ...opts, headers: retriedHeaders };
+    const res2 = await fetch(url, retriedOpts);
     if (!res2.ok) {
       if (res2.status === 401) {
         storage.clear();
         if (typeof window !== "undefined") window.location.href = "/login";
       }
-      const msg = (await safeErrorText(res2)) || `Error ${res2.status} en ${endpoint}`;
-      const err = new Error(msg);
-      err.status = res2.status;
-      throw err;
+      const errText = await safeErrorText(res2);
+      throw new Error(errText || `Error ${res2.status} en ${endpoint}`);
     }
     return parseBody(res2);
   }
 
   if (!res.ok) {
-    const msg = (await safeErrorText(res)) || `Error ${res.status} en ${endpoint}`;
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
+    const errText = await safeErrorText(res);
+    throw new Error(errText || `Error ${res.status} en ${endpoint}`);
   }
-
   return parseBody(res);
 }
 
-// ===== Request para FormData (fichar) con auto-refresh + timeout =====
-async function requestForm(endpoint, { formData, token = null, headers = {}, signal } = {}) {
-  assertNoMixedContent();
-
-  const url = join(endpoint);
-  const finalHeaders = buildHeaders(headers, token, /*willSendJsonBody*/ false);
-  // No pongas Content-Type: el navegador añade boundary correcto
-
-  const ac = new AbortController();
-  const t = setTimeout(() => ac.abort(new DOMException("Timeout", "AbortError")), HTTP_TIMEOUT_MS);
-
-  const baseOpts = {
-    method: "POST",
-    headers: finalHeaders,
-    credentials: USE_CREDENTIALS ? "include" : "same-origin",
-    body: formData,
-    signal: signal || ac.signal,
-  };
-
-  let res;
-  try {
-    res = await fetch(url, baseOpts);
-  } catch (e) {
-    clearTimeout(t);
-    const err = new Error(e?.name === "AbortError" ? "Solicitud agotada (timeout)" : "Error de red");
-    err.code = e?.name === "AbortError" ? "TIMEOUT" : "NETWORK";
-    err.cause = e;
-    throw err;
-  }
-  clearTimeout(t);
-
-  if (res.status === 401) {
-    if (!refreshing) {
-      refreshing = true;
-      try {
-        const newAccess = await refreshAccess();
-        waiters.forEach((resolve) => resolve(newAccess));
-        waiters = [];
-      } catch (err) {
-        waiters.forEach((resolve) => resolve(null));
-        waiters = [];
-        refreshing = false;
-        if (typeof window !== "undefined") window.location.href = "/login";
-        throw err;
-      } finally {
-        refreshing = false;
-      }
-    } else {
-      await new Promise((resolve) => waiters.push(resolve));
-    }
-
-    // Reintento con nuevo token (si lo hay)
-    const tokenAfter = storage.get();
-    const retryHeaders = buildHeaders(headers, tokenAfter, false);
-    const res2 = await fetch(url, { ...baseOpts, headers: retryHeaders });
-    if (!res2.ok) {
-      if (res2.status === 401) {
-        storage.clear();
-        if (typeof window !== "undefined") window.location.href = "/login";
-      }
-      const msg = (await safeErrorText(res2)) || `Error ${res2.status} en ${endpoint}`;
-      const err = new Error(msg);
-      err.status = res2.status;
-      throw err;
-    }
-    return parseBody(res2);
-  }
-
-  if (!res.ok) {
-    const msg = (await safeErrorText(res)) || `Error ${res.status} en ${endpoint}`;
-    const err = new Error(msg);
-    err.status = res.status;
-    throw err;
-  }
-
-  return parseBody(res);
-}
-
-// ===== API de alto nivel =====
+// --- API de alto nivel ---
 export const api = {
   get(endpoint, token = null, extraHeaders = {}, signal) {
     return request("GET", endpoint, { token, headers: extraHeaders, signal });
@@ -308,9 +189,9 @@ export const api = {
   delete(endpoint, token = null, extraHeaders = {}, signal) {
     return request("DELETE", endpoint, { token, headers: extraHeaders, signal });
   },
-  /** POST con FormData (p.ej. /fichar) */
+  // Nuevo: envío de FormData (no JSON, sin Content-Type manual)
   postForm(endpoint, formData, token = null, extraHeaders = {}, signal) {
-    return requestForm(endpoint, { formData, token, headers: extraHeaders, signal });
+    return request("POST", endpoint, { body: formData, token, headers: extraHeaders, signal });
   },
 };
 
@@ -324,7 +205,7 @@ export async function doLogin(email, password, remember = false) {
 }
 
 export async function doLogout() {
-  try { await api.post("/auth/logout", {}); } catch {}
+  try { await api.post("/auth/logout"); } catch {}
   storage.clear();
   if (typeof window !== "undefined") window.location.href = "/login";
 }
@@ -348,3 +229,4 @@ export async function fetchWorkingDaysMe(start, end, token = null, signal) {
 export async function fetchUserWorkingDays(...args) {
   return fetchWorkingDays(...args);
 }
+
