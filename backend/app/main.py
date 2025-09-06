@@ -1,4 +1,4 @@
-# backend/app/main.pes.router, prefix="/api"y
+# backend/app/main.py
 import os
 from typing import List
 
@@ -9,8 +9,8 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
-from app.routes import auth as auth_routes
 
+from app.routes import auth as auth_routes
 from app import database, crud, auth, utils, models
 from app.database import engine, get_db
 from app.models import Base, User
@@ -22,6 +22,7 @@ from app.routes import ausencias as ausencias_router
 from app.auth import get_current_user
 
 # ---------------- Bootstrapping DB ----------------
+# Nota: mantenemos create_all porque ya lo usas. (Si tienes migraciones aparte, podemos desactivarlo.)
 Base.metadata.create_all(bind=engine)
 
 # ---------------- App ----------------
@@ -35,24 +36,39 @@ def health():
 # Alias canónico /api/health
 app.add_api_route("/api/health", health, methods=["GET"])
 
-# ---------------- CORS (Cloudflare Pages) ----------------
+# ---------------- CORS (Cloudflare Pages + previews + localhost) ----------------
 STATIC_ALLOWED = [
     "https://sistema-fichajes.pages.dev",
-    "https://campel-fichajes.pages.dev",        # ⬅️ AÑADIDO
+    "https://campel-fichajes.pages.dev",
 ]
-# Previews: <hash>.PROYECTO.pages.dev  (acepta ambos proyectos)
-PAGES_PREVIEWS_REGEX = r"^https://[a-z0-9-]+\.(sistema-fichajes|campel-fichajes)\.pages\.dev$"  # ⬅️ CAMBIADO
 
+# Override por env para previews (útil si cambias de proveedor/host)
+DEFAULT_PREVIEWS_REGEX = r"^https://[a-z0-9-]+\.(sistema-fichajes|campel-fichajes)\.pages\.dev$"
+PAGES_PREVIEWS_REGEX = os.getenv("ALLOW_ORIGIN_REGEX", DEFAULT_PREVIEWS_REGEX)
+
+# Local dev (Vite dev/preview/otros). Se puede anular con ALLOW_LOCALHOST=0
+ALLOW_LOCALHOST = os.getenv("ALLOW_LOCALHOST", "1") not in ("0", "false", "False")
+LOCALHOST_ALLOWED = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",     # vite preview
+    "http://127.0.0.1:4173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+# Orígenes extra por env (coma-separado)
 extra = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-ALLOWED_ORIGINS = list(dict.fromkeys(STATIC_ALLOWED + extra))
+ALLOWED_ORIGINS = list(dict.fromkeys(STATIC_ALLOWED + (LOCALHOST_ALLOWED if ALLOW_LOCALHOST else []) + extra))
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_origin_regex=PAGES_PREVIEWS_REGEX,
-    allow_credentials=True,   # cookies/httpOnly ⇒ True
+    allow_credentials=True,   # si usas cookies httpOnly para refresh
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=600,              # reduce preflights repetidos
 )
 
 # ---------------- Modelos de entrada ----------------
@@ -301,12 +317,10 @@ def legacy_exportar_redirect():
     return RedirectResponse(url="/api/exportar-pdf", status_code=307)
 
 # Routers legacy (wildcards) -> /api
-# logs
 @app.api_route("/logs/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], include_in_schema=False)
 def legacy_logs_wildcard_redirect(path: str):
     return RedirectResponse(url=f"/api/logs/{path}", status_code=307)
 
-# ausencias
 @app.api_route("/ausencias/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], include_in_schema=False)
 def legacy_ausencias_wildcard_redirect(path: str):
     return RedirectResponse(url=f"/api/ausencias/{path}", status_code=307)

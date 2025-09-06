@@ -4,6 +4,7 @@ from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
+from sqlalchemy import text  # ⬅️ NUEVO
 
 from app.database import get_db
 from app.schemas_ausencias import AusenciaCreate, AusenciaUpdate, AusenciaOut
@@ -91,7 +92,7 @@ def _bloquear_solapes(db: Session, data: AusenciaCreate):
 
 
 # =========================
-# Endpoints
+# Endpoints existentes
 # =========================
 @router.post("", response_model=AusenciaOut, status_code=status.HTTP_201_CREATED)
 def crear(
@@ -206,3 +207,222 @@ def mis_ausencias(
 ):
     return crud.listar_ausencias(db, usuario_email=current_user.email)
 
+
+# =========================
+# NUEVOS ENDPOINTS READ-ONLY (balance/reglas/movimientos/validar)
+# =========================
+
+# Modelos locales (evitamos tocar schemas_ausencias.py)
+from pydantic import BaseModel  # noqa: E402
+
+
+class _SA_BalanceItem(BaseModel):
+    tipo: str
+    computo: str
+    permite_mediodia: bool
+    dias_anuales: float
+    asignado: float
+    arrastre: float
+    mov_delta: float
+    bolsa_total: float
+    gastado: float
+    disponible: float
+
+
+class _SA_BalanceResponse(BaseModel):
+    user_id: int
+    anio: int
+    saldos: List[_SA_BalanceItem]
+
+
+class _SA_ReglaItem(BaseModel):
+    tipo: str
+    computo: str
+    permite_mediodia: bool
+    dias_anuales: float
+
+
+class _SA_ReglasResponse(BaseModel):
+    user_id: int
+    anio: int
+    rules: List[_SA_ReglaItem]
+
+
+class _SA_Movimiento(BaseModel):
+    id: int
+    saldo_id: int
+    fecha: str
+    delta: float
+    motivo: str
+    referencia: Optional[str] = None
+
+
+class _SA_ValidateBody(BaseModel):
+    usuario_id: Optional[int] = None
+    usuario_email: Optional[str] = None
+    tipo: str
+    desde: date
+    hasta: date
+    medio_dia: bool = False
+
+
+class _SA_ValidateResponse(BaseModel):
+    allowed: bool
+    reason: Optional[str] = None
+    requested_days: float
+    available_days: float
+    computo: str
+    permite_mediodia: bool
+
+
+def _resolver_usuario(db: Session, usuario_id: Optional[int], usuario_email: Optional[str]) -> tuple[int, str]:
+    """Devuelve (id, email) o lanza 404."""
+    if usuario_id is not None:
+        row = db.execute(text("SELECT id, email FROM users WHERE id=:id"), {"id": usuario_id}).first()
+        if row:
+            return int(row[0]), str(row[1])
+    if usuario_email:
+        row = db.execute(text("SELECT id, email FROM users WHERE email=:e"), {"e": usuario_email}).first()
+        if row:
+            return int(row[0]), str(row[1])
+    raise HTTPException(status_code=404, detail="usuario_no_encontrado")
+
+
+@router.get("/balance", response_model=_SA_BalanceResponse)
+def balance(
+    user_id: Optional[int] = Query(None, ge=1),
+    email: Optional[str] = Query(None),
+    year: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    _current: User = Depends(get_current_user),
+):
+    uid, uemail = _resolver_usuario(db, user_id, email) if (user_id or email) else (_current.id, _current.email)
+    anio = year or date.today().year
+
+    sql = text("""
+    WITH u AS (SELECT :uid::int AS id, :uemail::text AS email),
+    t AS (
+      SELECT s.tipo::text AS tipo
+      FROM saldos_ausencia s
+      WHERE s.usuario_id = :uid AND s.anio = :anio
+    )
+    SELECT r.*
+    FROM u, t,
+         LATERAL public.resumen_ausencia_anual(u.email, :anio, t.tipo) AS r
+    ORDER BY r.tipo
+    """)
+    rows = db.execute(sql, {"uid": uid, "uemail": uemail, "anio": anio}).mappings().all()
+    items = [_SA_BalanceItem(**r) for r in rows]
+    return _SA_BalanceResponse(user_id=uid, anio=anio, saldos=items)
+
+
+@router.get("/reglas", response_model=_SA_ReglasResponse)
+def reglas(
+    user_id: Optional[int] = Query(None, ge=1),
+    email: Optional[str] = Query(None),
+    year: Optional[int] = Query(None),
+    db: Session = Depends(get_db),
+    _current: User = Depends(get_current_user),
+):
+    uid, _ = _resolver_usuario(db, user_id, email) if (user_id or email) else (_current.id, _current.email)
+    anio = year or date.today().year
+
+    sql = text("""
+    SELECT r.tipo::text AS tipo,
+           r.computo::text AS computo,
+           r.permite_mediodia,
+           r.dias_anuales::numeric AS dias_anuales
+    FROM reglas_ausencia r
+    JOIN usuarios_convenio uc ON uc.convenio_id = r.convenio_id
+    WHERE uc.usuario_id = :uid
+    ORDER BY r.tipo
+    """)
+    rows = db.execute(sql, {"uid": uid}).mappings().all()
+    items = [_SA_ReglaItem(**r) for r in rows]
+    return _SA_ReglasResponse(user_id=uid, anio=anio, rules=items)
+
+
+@router.get("/movimientos", response_model=List[_SA_Movimiento])
+def movimientos(
+    user_id: Optional[int] = Query(None, ge=1),
+    email: Optional[str] = Query(None),
+    limit: int = Query(100, ge=1, le=1000),
+    db: Session = Depends(get_db),
+    _current: User = Depends(get_current_user),
+):
+    uid, _ = _resolver_usuario(db, user_id, email) if (user_id or email) else (_current.id, _current.email)
+    sql = text("""
+    SELECT m.id, m.saldo_id, m.fecha, m.delta,
+           m.motivo::text AS motivo, m.referencia
+    FROM movimientos_saldo_ausencia m
+    JOIN saldos_ausencia s ON s.id = m.saldo_id
+    WHERE s.usuario_id = :uid
+    ORDER BY m.fecha DESC, m.id DESC
+    LIMIT :lim
+    """)
+    rows = db.execute(sql, {"uid": uid, "lim": limit}).mappings().all()
+    return [_SA_Movimiento(**r) for r in rows]
+
+
+@router.post("/validar", response_model=_SA_ValidateResponse)
+def validar(
+    body: _SA_ValidateBody,
+    db: Session = Depends(get_db),
+    _current: User = Depends(get_current_user),
+):
+    uid, uemail = _resolver_usuario(db, body.usuario_id, body.usuario_email) if (body.usuario_id or body.usuario_email) else (_current.id, _current.email)
+    if body.desde > body.hasta:
+        raise HTTPException(status_code=400, detail="rango_fechas_invalido")
+
+    # Regla por tipo para computo/medio día
+    rule = db.execute(text("""
+      SELECT r.computo::text AS computo, r.permite_mediodia
+      FROM reglas_ausencia r
+      JOIN usuarios_convenio uc ON uc.convenio_id = r.convenio_id
+      WHERE uc.usuario_id=:uid AND r.tipo::text=:tipo
+    """), {"uid": uid, "tipo": body.tipo}).mappings().first()
+    if not rule:
+        raise HTTPException(status_code=404, detail="regla_no_encontrada")
+
+    computo = rule["computo"]
+    permite_mediodia = bool(rule["permite_mediodia"])
+
+    # Días solicitados
+    if body.medio_dia:
+        requested = 0.5
+    else:
+        if computo == "LABORABLES":
+            requested = float(db.execute(
+                text("SELECT public.working_days_for_user(:uid, :d, :h)"),
+                {"uid": uid, "d": body.desde, "h": body.hasta}
+            ).scalar() or 0)
+        else:
+            requested = float((body.hasta - body.desde).days + 1)
+
+    if body.medio_dia and not permite_mediodia:
+        return _SA_ValidateResponse(
+            allowed=False, reason="medio_dia_no_permitido",
+            requested_days=requested, available_days=0.0,
+            computo=computo, permite_mediodia=permite_mediodia
+        )
+
+    # Disponible usando tu función resumen_ausencia_anual
+    anio = body.desde.year
+    resumen = db.execute(
+        text("SELECT * FROM public.resumen_ausencia_anual(:email, :anio, :tipo)"),
+        {"email": uemail, "anio": anio, "tipo": body.tipo}
+    ).mappings().first()
+    if not resumen:
+        raise HTTPException(status_code=404, detail="resumen_no_disponible")
+
+    available = float(resumen.get("disponible") or 0)
+    allowed = requested <= available
+
+    return _SA_ValidateResponse(
+        allowed=allowed,
+        reason=None if allowed else "saldo_insuficiente",
+        requested_days=requested,
+        available_days=available,
+        computo=computo,
+        permite_mediodia=permite_mediodia
+    )
