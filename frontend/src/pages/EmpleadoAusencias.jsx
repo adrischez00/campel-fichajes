@@ -5,6 +5,7 @@ import { useLocation, useNavigate } from "react-router-dom";
 import SolicitarAusenciaForm from "../components/empleado/SolicitarAusenciaForm";
 import MisAusencias from "../components/empleado/MisAusencias";
 import AusenciasCalendario from "../components/empleado/AusenciasCalendario";
+import SaldoVacacionesWidget from "../components/empleado/SaldoVacacionesWidget.jsx";
 
 import { ausenciasService } from "../services/ausencias";
 import { API_URL, doLogout } from "../services/api";
@@ -23,7 +24,7 @@ export default function EmpleadoAusencias({ session }) {
   const navigate = useNavigate();
   const location = useLocation();
   const qs = new URLSearchParams(location.search);
-  const initialTab = ["solicitar", "mis", "calendario"].includes(qs.get("tab"))
+  const initialTab = ["solicitar", "mis", "saldos", "calendario"].includes(qs.get("tab"))
     ? qs.get("tab")
     : "solicitar";
 
@@ -48,10 +49,7 @@ export default function EmpleadoAusencias({ session }) {
   async function cargarMias() {
     setCargando(true);
     try {
-      const datos = await ausenciasService.listarMiasPorEmail(
-        token,
-        emailUsuario
-      );
+      const datos = await ausenciasService.listarMiasPorEmail(token, emailUsuario);
       setMisAusencias(Array.isArray(datos) ? datos : []);
     } catch (err) {
       console.error("Error cargando ausencias:", err);
@@ -95,9 +93,7 @@ export default function EmpleadoAusencias({ session }) {
         {/* Encabezado de sección */}
         <header className="flex items-center justify-between backdrop-blur-md bg-white/30 border border-white/40 rounded-2xl px-5 py-3 shadow-lg">
           <div>
-            <h1 className="text-2xl font-bold text-[#004B87]">
-              Ausencias y Vacaciones
-            </h1>
+            <h1 className="text-2xl font-bold text-[#004B87]">Ausencias y Vacaciones</h1>
             <p className="text-sm text-slate-700">{emailUsuario}</p>
           </div>
           <button
@@ -113,6 +109,7 @@ export default function EmpleadoAusencias({ session }) {
           {[
             { k: "solicitar", label: "Solicitar" },
             { k: "mis", label: "Mis solicitudes" },
+            { k: "saldos", label: "Saldos" },          // ← NUEVA pestaña
             { k: "calendario", label: "Calendario" },
           ].map((t) => (
             <button
@@ -149,6 +146,12 @@ export default function EmpleadoAusencias({ session }) {
             </div>
           )}
 
+          {tab === "saldos" && (                       // ← Widget aquí
+            <div className="max-w-3xl mx-auto">
+              <SaldoVacacionesWidget />
+            </div>
+          )}
+
           {tab === "calendario" && (
             <div className="max-w-5xl mx-auto">
               <AusenciasCalendario
@@ -181,5 +184,4 @@ onPrefill={(start, end) => {
   );
   goTab("solicitar");
 }}
-
 */
