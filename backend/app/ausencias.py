@@ -3,8 +3,9 @@ from datetime import date, time as _time
 from typing import Optional, List
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import text  # ⬅️ NUEVO
+from sqlalchemy import text
 
 from app.database import get_db
 from app.schemas_ausencias import AusenciaCreate, AusenciaUpdate, AusenciaOut
@@ -14,85 +15,27 @@ from app import crud
 
 router = APIRouter(prefix="/ausencias", tags=["Ausencias"])
 
-
 # =========================
 # Validaciones / helpers
 # =========================
 def _validar_payload_creacion(data: AusenciaCreate):
-    """Reglas de coherencia de fechas/horas para creación/alias."""
+    # Día completo: horas deben venir vacías
     if not data.parcial:
-        # Día completo: horas deben venir vacías
         if data.hora_inicio is not None or data.hora_fin is not None:
             raise HTTPException(status_code=400, detail="Para día completo, hora_inicio y hora_fin deben ser NULL.")
         if data.fecha_fin < data.fecha_inicio:
             raise HTTPException(status_code=400, detail="fecha_fin no puede ser anterior a fecha_inicio.")
-        return
-
-    # Parcial
-    if data.hora_inicio is None or data.hora_fin is None:
-        raise HTTPException(status_code=400, detail="En ausencias parciales, hora_inicio y hora_fin son obligatorias.")
-    if data.fecha_fin < data.fecha_inicio:
-        raise HTTPException(status_code=400, detail="fecha_fin no puede ser anterior a fecha_inicio.")
-    if data.fecha_fin == data.fecha_inicio and data.hora_fin <= data.hora_inicio:
-        raise HTTPException(status_code=400, detail="En el mismo día, hora_fin debe ser mayor que hora_inicio.")
-
-
-def _hay_solape_horas_si_mismo_dia_y_parciales(
-    a: Ausencia,
-    b_parcial: bool,
-    b_fi: date, b_hi: Optional[_time],
-    b_ff: date, b_hf: Optional[_time],
-) -> bool:
-    """
-    Devuelve True si hay solape por horas cuando:
-    - Ambos son parciales y
-    - El rango día de 'a' y 'b' es el mismo día
-    """
-    if not (a.parcial and b_parcial):
-        return False
-    if not (a.fecha_inicio == a.fecha_fin == b_fi == b_ff):
-        return False
-
-    ai = a.hora_inicio or _time.min
-    af = a.hora_fin or _time.max
-    bi = b_hi or _time.min
-    bf = b_hf or _time.max
-    # solape estricto en [inicio, fin)
-    return (ai < bf) and (bi < af)
-
-
-def _bloquear_solapes(db: Session, data: AusenciaCreate):
-    """
-    Política: impedir solape con APROBADAS y PENDIENTES del mismo usuario.
-    Si ambos son parciales y mismo día, se compara por horas. En los demás
-    casos, si las fechas se cruzan, se considera solape.
-    """
-    candidatos = db.query(Ausencia).filter(
-        Ausencia.usuario_email == data.usuario_email,
-        Ausencia.estado.in_(["APROBADA", "PENDIENTE"]),
-        Ausencia.fecha_inicio <= data.fecha_fin,
-        Ausencia.fecha_fin >= data.fecha_inicio,
-    ).all()
-
-    for a in candidatos:
-        # Si ambos parciales y mismo día: miramos horas
-        if _hay_solape_horas_si_mismo_dia_y_parciales(
-            a, data.parcial, data.fecha_inicio, data.hora_inicio, data.fecha_fin, data.hora_fin
-        ):
-            raise HTTPException(
-                status_code=409,
-                detail=f"Existe una ausencia {a.estado.lower()} que se solapa por horas (id={a.id})."
-            )
-        # En cualquier otro cruce de fechas, tratamos como solape directo
-        if not (a.parcial and data.parcial and a.fecha_inicio == a.fecha_fin == data.fecha_inicio == data.fecha_fin):
-            raise HTTPException(
-                status_code=409,
-                detail=f"Existe una ausencia {a.estado.lower()} que solapa con el rango indicado (id={a.id})."
-            )
-
+    else:
+        # Parcial: horas obligatorias y rango consistente
+        if data.hora_inicio is None or data.hora_fin is None:
+            raise HTTPException(status_code=400, detail="En ausencias parciales, hora_inicio y hora_fin son obligatorias.")
+        if (data.fecha_fin == data.fecha_inicio) and (data.hora_fin <= data.hora_inicio):
+            raise HTTPException(status_code=400, detail="En el mismo día, hora_fin debe ser mayor que hora_inicio.")
+        if data.fecha_fin < data.fecha_inicio:
+            raise HTTPException(status_code=400, detail="fecha_fin no puede ser anterior a fecha_inicio.")
 
 # =========================
-# Endpoints existentes
+# Endpoints CRUD existentes
 # =========================
 @router.post("", response_model=AusenciaOut, status_code=status.HTTP_201_CREATED)
 def crear(
@@ -106,11 +49,8 @@ def crear(
     if current_user.role not in ("admin", "manager") and data.usuario_email != current_user.email:
         raise HTTPException(status_code=403, detail="No autorizado a crear ausencias para otros usuarios.")
 
-    # Bloquear solapes (aprobadas/pendientes)
-    _bloquear_solapes(db, data)
-
-    return crud.crear_ausencia(db, data, creador_email=current_user.email)
-
+    ausencia = crud.crear_ausencia(db, data, creador_email=current_user.email)
+    return ausencia
 
 @router.get("", response_model=List[AusenciaOut])
 def listar(
@@ -122,7 +62,7 @@ def listar(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Empleado: solo sus ausencias. Admin/manager: cualquier usuario
+    # Empleado: solo sus ausencias. Admin/manager: cualquier usuario.
     if current_user.role not in ("admin", "manager"):
         usuario_email = current_user.email
 
@@ -130,7 +70,6 @@ def listar(
         raise HTTPException(status_code=400, detail="El rango de fechas es inválido (hasta < desde).")
 
     return crud.listar_ausencias(db, usuario_email, estado, tipo, desde, hasta)
-
 
 @router.patch("/{ausencia_id}", response_model=AusenciaOut)
 def actualizar(
@@ -154,7 +93,6 @@ def actualizar(
         raise HTTPException(status_code=404, detail="Ausencia no encontrada")
     return aus
 
-
 @router.post("/{ausencia_id}/aprobar", response_model=AusenciaOut)
 def aprobar(
     ausencia_id: int,
@@ -167,7 +105,6 @@ def aprobar(
     if not aus:
         raise HTTPException(status_code=404, detail="Ausencia no encontrada")
     return aus
-
 
 @router.post("/{ausencia_id}/rechazar", response_model=AusenciaOut)
 def rechazar(
@@ -182,23 +119,45 @@ def rechazar(
         raise HTTPException(status_code=404, detail="Ausencia no encontrada")
     return aus
 
-
-# === Alias frontal: POST /ausencias/crear ===
+# === ALIAS: POST /ausencias/crear ===
 @router.post("/crear", response_model=AusenciaOut, status_code=status.HTTP_201_CREATED)
 def crear_alias(
     data: AusenciaCreate,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Misma lógica que en POST base, reutilizando helpers
     if current_user.role not in ("admin", "manager") and data.usuario_email != current_user.email:
         raise HTTPException(status_code=403, detail="No autorizado a crear ausencias para otros usuarios.")
 
     _validar_payload_creacion(data)
-    _bloquear_solapes(db, data)
+
+    # control de solapes con APROBADAS y PENDIENTES
+    posibles_solapes = db.query(Ausencia).filter(
+        Ausencia.usuario_email == data.usuario_email,
+        Ausencia.estado.in_(["APROBADA", "PENDIENTE"]),
+        Ausencia.fecha_inicio <= data.fecha_fin,
+        Ausencia.fecha_fin >= data.fecha_inicio,
+    ).all()
+
+    def _hay_solape_horas(a: Ausencia, b_parcial: bool, b_fi, b_hi, b_ff, b_hf) -> bool:
+        if not a.parcial or not b_parcial:
+            return True
+        if a.fecha_inicio == a.fecha_fin == b_fi == b_ff:
+            ai = a.hora_inicio or _time.min
+            af = a.hora_fin or _time.max
+            bi = b_hi or _time.min
+            bf = b_hf or _time.max
+            return (ai < bf) and (bi < af)
+        return True
+
+    for a in posibles_solapes:
+        if _hay_solape_horas(a, data.parcial, data.fecha_inicio, data.hora_inicio, data.fecha_fin, data.hora_fin):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Existe una ausencia {a.estado.lower()} que solapa con el rango indicado (id={a.id})."
+            )
 
     return crud.crear_ausencia(db, data, creador_email=current_user.email)
-
 
 @router.get("/mias", response_model=List[AusenciaOut])
 def mis_ausencias(
@@ -207,16 +166,11 @@ def mis_ausencias(
 ):
     return crud.listar_ausencias(db, usuario_email=current_user.email)
 
-
 # =========================
 # NUEVOS ENDPOINTS READ-ONLY (balance/reglas/movimientos/validar)
 # =========================
 
-# Modelos locales (evitamos tocar schemas_ausencias.py)
-from pydantic import BaseModel  # noqa: E402
-
-
-class _SA_BalanceItem(BaseModel):
+class _BalanceItem(BaseModel):
     tipo: str
     computo: str
     permite_mediodia: bool
@@ -228,27 +182,23 @@ class _SA_BalanceItem(BaseModel):
     gastado: float
     disponible: float
 
-
-class _SA_BalanceResponse(BaseModel):
+class _BalanceResponse(BaseModel):
     user_id: int
     anio: int
-    saldos: List[_SA_BalanceItem]
+    saldos: List[_BalanceItem]
 
-
-class _SA_ReglaItem(BaseModel):
+class _ReglaItem(BaseModel):
     tipo: str
     computo: str
     permite_mediodia: bool
     dias_anuales: float
 
-
-class _SA_ReglasResponse(BaseModel):
+class _ReglasResponse(BaseModel):
     user_id: int
     anio: int
-    rules: List[_SA_ReglaItem]
+    rules: List[_ReglaItem]
 
-
-class _SA_Movimiento(BaseModel):
+class _Movimiento(BaseModel):
     id: int
     saldo_id: int
     fecha: str
@@ -256,8 +206,7 @@ class _SA_Movimiento(BaseModel):
     motivo: str
     referencia: Optional[str] = None
 
-
-class _SA_ValidateBody(BaseModel):
+class _ValidateBody(BaseModel):
     usuario_id: Optional[int] = None
     usuario_email: Optional[str] = None
     tipo: str
@@ -265,8 +214,7 @@ class _SA_ValidateBody(BaseModel):
     hasta: date
     medio_dia: bool = False
 
-
-class _SA_ValidateResponse(BaseModel):
+class _ValidateResponse(BaseModel):
     allowed: bool
     reason: Optional[str] = None
     requested_days: float
@@ -274,29 +222,27 @@ class _SA_ValidateResponse(BaseModel):
     computo: str
     permite_mediodia: bool
 
-
-def _resolver_usuario(db: Session, usuario_id: Optional[int], usuario_email: Optional[str]) -> tuple[int, str]:
-    """Devuelve (id, email) o lanza 404."""
-    if usuario_id is not None:
-        row = db.execute(text("SELECT id, email FROM users WHERE id=:id"), {"id": usuario_id}).first()
+def _resolver_usuario(db: Session, uid: Optional[int], email: Optional[str], fallback: User) -> tuple[int, str]:
+    """Devuelve (id, email) resolviendo por id o email; si no, usa el usuario autenticado."""
+    if uid is not None:
+        row = db.execute(text("SELECT id, email FROM users WHERE id=:id"), {"id": uid}).first()
         if row:
             return int(row[0]), str(row[1])
-    if usuario_email:
-        row = db.execute(text("SELECT id, email FROM users WHERE email=:e"), {"e": usuario_email}).first()
+    if email:
+        row = db.execute(text("SELECT id, email FROM users WHERE email=:e"), {"e": email}).first()
         if row:
             return int(row[0]), str(row[1])
-    raise HTTPException(status_code=404, detail="usuario_no_encontrado")
+    return fallback.id, fallback.email
 
-
-@router.get("/balance", response_model=_SA_BalanceResponse)
+@router.get("/balance", response_model=_BalanceResponse)
 def balance(
     user_id: Optional[int] = Query(None, ge=1),
     email: Optional[str] = Query(None),
     year: Optional[int] = Query(None),
     db: Session = Depends(get_db),
-    _current: User = Depends(get_current_user),
+    me: User = Depends(get_current_user),
 ):
-    uid, uemail = _resolver_usuario(db, user_id, email) if (user_id or email) else (_current.id, _current.email)
+    uid, uemail = _resolver_usuario(db, user_id, email, me)
     anio = year or date.today().year
 
     sql = text("""
@@ -312,69 +258,63 @@ def balance(
     ORDER BY r.tipo
     """)
     rows = db.execute(sql, {"uid": uid, "uemail": uemail, "anio": anio}).mappings().all()
-    items = [_SA_BalanceItem(**r) for r in rows]
-    return _SA_BalanceResponse(user_id=uid, anio=anio, saldos=items)
+    return _BalanceResponse(user_id=uid, anio=anio, saldos=[_BalanceItem(**r) for r in rows])
 
-
-@router.get("/reglas", response_model=_SA_ReglasResponse)
+@router.get("/reglas", response_model=_ReglasResponse)
 def reglas(
     user_id: Optional[int] = Query(None, ge=1),
     email: Optional[str] = Query(None),
     year: Optional[int] = Query(None),
     db: Session = Depends(get_db),
-    _current: User = Depends(get_current_user),
+    me: User = Depends(get_current_user),
 ):
-    uid, _ = _resolver_usuario(db, user_id, email) if (user_id or email) else (_current.id, _current.email)
+    uid, _ = _resolver_usuario(db, user_id, email, me)
     anio = year or date.today().year
 
     sql = text("""
-    SELECT r.tipo::text AS tipo,
-           r.computo::text AS computo,
-           r.permite_mediodia,
-           r.dias_anuales::numeric AS dias_anuales
-    FROM reglas_ausencia r
-    JOIN usuarios_convenio uc ON uc.convenio_id = r.convenio_id
-    WHERE uc.usuario_id = :uid
-    ORDER BY r.tipo
+      SELECT r.tipo::text AS tipo,
+             r.computo::text AS computo,
+             r.permite_mediodia,
+             r.dias_anuales::numeric AS dias_anuales
+      FROM reglas_ausencia r
+      JOIN usuarios_convenio uc ON uc.convenio_id = r.convenio_id
+      WHERE uc.usuario_id = :uid
+      ORDER BY r.tipo
     """)
     rows = db.execute(sql, {"uid": uid}).mappings().all()
-    items = [_SA_ReglaItem(**r) for r in rows]
-    return _SA_ReglasResponse(user_id=uid, anio=anio, rules=items)
+    return _ReglasResponse(user_id=uid, anio=anio, rules=[_ReglaItem(**r) for r in rows])
 
-
-@router.get("/movimientos", response_model=List[_SA_Movimiento])
+@router.get("/movimientos", response_model=List[_Movimiento])
 def movimientos(
     user_id: Optional[int] = Query(None, ge=1),
     email: Optional[str] = Query(None),
     limit: int = Query(100, ge=1, le=1000),
     db: Session = Depends(get_db),
-    _current: User = Depends(get_current_user),
+    me: User = Depends(get_current_user),
 ):
-    uid, _ = _resolver_usuario(db, user_id, email) if (user_id or email) else (_current.id, _current.email)
+    uid, _ = _resolver_usuario(db, user_id, email, me)
     sql = text("""
-    SELECT m.id, m.saldo_id, m.fecha, m.delta,
-           m.motivo::text AS motivo, m.referencia
-    FROM movimientos_saldo_ausencia m
-    JOIN saldos_ausencia s ON s.id = m.saldo_id
-    WHERE s.usuario_id = :uid
-    ORDER BY m.fecha DESC, m.id DESC
-    LIMIT :lim
+      SELECT m.id, m.saldo_id, m.fecha, m.delta,
+             m.motivo::text AS motivo, m.referencia
+      FROM movimientos_saldo_ausencia m
+      JOIN saldos_ausencia s ON s.id = m.saldo_id
+      WHERE s.usuario_id = :uid
+      ORDER BY m.fecha DESC, m.id DESC
+      LIMIT :lim
     """)
     rows = db.execute(sql, {"uid": uid, "lim": limit}).mappings().all()
-    return [_SA_Movimiento(**r) for r in rows]
+    return [_Movimiento(**r) for r in rows]
 
-
-@router.post("/validar", response_model=_SA_ValidateResponse)
+@router.post("/validar", response_model=_ValidateResponse)
 def validar(
-    body: _SA_ValidateBody,
+    body: _ValidateBody,
     db: Session = Depends(get_db),
-    _current: User = Depends(get_current_user),
+    me: User = Depends(get_current_user),
 ):
-    uid, uemail = _resolver_usuario(db, body.usuario_id, body.usuario_email) if (body.usuario_id or body.usuario_email) else (_current.id, _current.email)
+    uid, uemail = _resolver_usuario(db, body.usuario_id, body.usuario_email, me)
     if body.desde > body.hasta:
         raise HTTPException(status_code=400, detail="rango_fechas_invalido")
 
-    # Regla por tipo para computo/medio día
     rule = db.execute(text("""
       SELECT r.computo::text AS computo, r.permite_mediodia
       FROM reglas_ausencia r
@@ -400,13 +340,12 @@ def validar(
             requested = float((body.hasta - body.desde).days + 1)
 
     if body.medio_dia and not permite_mediodia:
-        return _SA_ValidateResponse(
+        return _ValidateResponse(
             allowed=False, reason="medio_dia_no_permitido",
             requested_days=requested, available_days=0.0,
             computo=computo, permite_mediodia=permite_mediodia
         )
 
-    # Disponible usando tu función resumen_ausencia_anual
     anio = body.desde.year
     resumen = db.execute(
         text("SELECT * FROM public.resumen_ausencia_anual(:email, :anio, :tipo)"),
@@ -418,7 +357,7 @@ def validar(
     available = float(resumen.get("disponible") or 0)
     allowed = requested <= available
 
-    return _SA_ValidateResponse(
+    return _ValidateResponse(
         allowed=allowed,
         reason=None if allowed else "saldo_insuficiente",
         requested_days=requested,
@@ -426,3 +365,84 @@ def validar(
         computo=computo,
         permite_mediodia=permite_mediodia
     )
+
+# =========================
+# NUEVO: crear movimiento de saldo (admin/manager)
+# =========================
+
+class _MovimientoCreate(BaseModel):
+    usuario_id: Optional[int] = None
+    usuario_email: Optional[str] = None
+    year: Optional[int] = None         # si no, se toma de 'fecha'
+    tipo: str                           # VACACIONES, LIBRE_DISPOSICION, ...
+    fecha: date
+    delta: float                        # +1.0, -0.5, ...
+    motivo: str
+    referencia: Optional[str] = None
+
+class _MovimientoCreateOut(BaseModel):
+    movimiento: _Movimiento
+    balance: _BalanceItem               # balance actualizado para ese tipo
+
+@router.post("/movimientos", response_model=_MovimientoCreateOut, status_code=status.HTTP_201_CREATED)
+def crear_movimiento(
+    body: _MovimientoCreate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Solo admin/manager puede ajustar saldos
+    if current_user.role not in ("admin", "manager"):
+        raise HTTPException(status_code=403, detail="No autorizado")
+
+    uid, uemail = _resolver_usuario(db, body.usuario_id, body.usuario_email, current_user)
+    anio = int(body.year or body.fecha.year)
+    tipo = body.tipo
+
+    # Asegura existencia del saldo (si no existe, lo crea a 0)
+    saldo_id_sql = text("""
+      WITH up AS (
+        INSERT INTO saldos_ausencia (usuario_id, anio, tipo, asignado, arrastre)
+        SELECT :uid, :anio, :tipo::text, 0, 0
+        WHERE NOT EXISTS (
+          SELECT 1 FROM saldos_ausencia WHERE usuario_id=:uid AND anio=:anio AND tipo::text=:tipo
+        )
+        RETURNING id
+      )
+      SELECT id FROM up
+      UNION ALL
+      SELECT id FROM saldos_ausencia WHERE usuario_id=:uid AND anio=:anio AND tipo::text=:tipo
+      LIMIT 1
+    """)
+    saldo_id = db.execute(saldo_id_sql, {"uid": uid, "anio": anio, "tipo": tipo}).scalar()
+    if not saldo_id:
+        raise HTTPException(status_code=500, detail="No se pudo localizar/crear el saldo.")
+
+    # Inserta movimiento
+    ins_sql = text("""
+      INSERT INTO movimientos_saldo_ausencia (saldo_id, fecha, delta, motivo, referencia)
+      VALUES (:sid, :fecha, :delta, :motivo, :ref)
+      RETURNING id, saldo_id, fecha::text, delta::numeric, motivo::text, referencia
+    """)
+    mv = db.execute(ins_sql, {
+        "sid": int(saldo_id),
+        "fecha": body.fecha,
+        "delta": float(body.delta),
+        "motivo": body.motivo.strip(),
+        "ref": body.referencia
+    }).mappings().first()
+    db.commit()
+
+    # Relee balance actualizado para ese tipo
+    bal_row = db.execute(
+        text("SELECT * FROM public.resumen_ausencia_anual(:email, :anio, :tipo)"),
+        {"email": uemail, "anio": anio, "tipo": tipo}
+    ).mappings().first()
+    if not bal_row:
+        # Si no hay resumen (muy raro), devolvemos al menos el movimiento
+        raise HTTPException(status_code=500, detail="Movimiento creado, pero no se pudo leer el balance.")
+
+    return _MovimientoCreateOut(
+        movimiento=_Movimiento(**mv),
+        balance=_BalanceItem(**bal_row)
+    )
+

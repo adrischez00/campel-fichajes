@@ -31,7 +31,7 @@ export function validar(token, body) {
   return api.post(`/ausencias/validar`, body, token);
 }
 
-/** Crea una ausencia (usa alias /crear por compatibilidad). */
+/** Crea una ausencia (alias /crear). */
 export function crear(token, payload) {
   return api.post(`/ausencias/crear`, payload, token);
 }
@@ -40,26 +40,26 @@ export function crear(token, payload) {
 export function listarMiasPorEmail(token, email) {
   return api.get(`/ausencias${qs({ usuario_email: email })}`, token);
 }
-
 export function listarTodas(token, filtros = {}) {
   return api.get(`/ausencias${qs(filtros)}`, token);
 }
-
 export function aprobar(token, id) {
-  // POST sin body
   return api.post(`/ausencias/${id}/aprobar`, null, token);
 }
-
 export function rechazar(token, id /*, motivoRechazo */) {
-  // POST sin body (el backend actual no espera motivo)
   return api.post(`/ausencias/${id}/rechazar`, null, token);
 }
-
 export function eliminar(token, id) {
   return api.delete(`/ausencias/${id}`, token);
 }
 
-// API agrupada por comodidad
+/** NUEVO: crear ajuste de saldo (movimiento manual admin/manager). */
+export function crearMovimiento(token, body) {
+  // body: { usuario_id|usuario_email, year?, tipo, fecha(YYYY-MM-DD), delta, motivo, referencia? }
+  return api.post(`/ausencias/movimientos`, body, token);
+}
+
+// API agrupada
 export const ausenciasService = {
   getBalance,
   reglas,
@@ -71,6 +71,7 @@ export const ausenciasService = {
   aprobar,
   rechazar,
   eliminar,
+  crearMovimiento,
 };
 
 export default ausenciasService;

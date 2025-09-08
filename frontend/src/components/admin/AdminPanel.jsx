@@ -7,7 +7,8 @@ import SolicitudesTab from './SolicitudesTab';
 import GestionAusencias from './GestionAusencias';
 import LogsTab from './LogsTab';
 import UsuariosTab from './UsuariosTab';
-import { api, API_URL } from '../../services/api.js'; // API_URL se pasa a UsuariosTab si lo necesita
+import AdminSaldos from './AdminSaldos';            // 👈 NUEVO
+import { api, API_URL } from '../../services/api.js';
 
 export default function AdminPanel({ session, onLogout }) {
   const [solicitudes, setSolicitudes] = useState([]);
@@ -106,6 +107,7 @@ export default function AdminPanel({ session, onLogout }) {
     if (tab === 'usuarios') setActiveTab('Usuarios');
     else if (tab === 'logs') setActiveTab('Logs');
     else if (tab === 'ausencias') setActiveTab('Ausencias');
+    else if (tab === 'saldos') setActiveTab('Saldos');          // 👈 NUEVO
     else setActiveTab('Solicitudes');
 
     if (tab === 'solicitudes') {
@@ -131,6 +133,7 @@ export default function AdminPanel({ session, onLogout }) {
       if (tab === 'usuarios') setActiveTab('Usuarios');
       else if (tab === 'logs') setActiveTab('Logs');
       else if (tab === 'ausencias') setActiveTab('Ausencias');
+      else if (tab === 'saldos') setActiveTab('Saldos');        // 👈 NUEVO
       else setActiveTab('Solicitudes');
 
       if (tab === 'solicitudes') {
@@ -203,6 +206,12 @@ export default function AdminPanel({ session, onLogout }) {
       label: 'Ausencias',
       icon: '📅',
       content: <GestionAusencias token={token} />
+    },
+    {
+      name: 'Saldos',                         // 👈 NUEVO
+      label: 'Saldos',
+      icon: '💼',
+      content: <AdminSaldos token={token} />
     },
     {
       name: 'Usuarios',
