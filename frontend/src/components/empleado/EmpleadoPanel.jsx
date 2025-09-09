@@ -1,26 +1,32 @@
 // src/components/empleado/EmpleadoPanel.jsx
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../../services/api.js';
+import { api } from '../../services/api.js'; // base URL + auto-refresh centralizados
 import Header from '../shared/Header';
 import { toast } from 'react-toastify';
 import FichajeBloque from './FichajeBloque';
 import SolicitudManualForm from './SolicitudManualForm.jsx';
 import Paginacion from '../shared/Paginacion';
+import SaldoVacacionesWidget from './SaldoVacacionesWidget.jsx';
 
 // Helpers (Madrid + ISO sin zona => UTC)
 import { parseISO, yyyymmddTZ, fmtHoraISO, fmtFechaISO } from '../../utils/fecha';
 
+// Helper aviso “desde…”
 const formateaAviso = (iso) => {
   if (!iso) return '';
   const ts = parseISO(iso);
   if (!ts || isNaN(ts)) return '';
+
   const hoyISO = yyyymmddTZ(new Date());
   const diaISO = yyyymmddTZ(ts);
+
   const diffDias = Math.floor(
     (new Date(hoyISO + 'T00:00:00Z') - new Date(diaISO + 'T00:00:00Z')) / 86400000
   );
+
   const hora = fmtHoraISO(ts.toISOString());
+
   if (diffDias === 0) return `desde las ${hora}`;
   if (diffDias === 1) return `desde Ayer a las ${hora}`;
   return `desde el ${fmtFechaISO(ts.toISOString())} a las ${hora} (hace ${diffDias} días)`;
@@ -40,11 +46,17 @@ export default function EmpleadoPanel({ session, onLogout }) {
   const [pagina, setPagina] = useState(1);
   const porPagina = 3;
 
+  // refresco del widget de saldos cuando el usuario ficha
+  const [saldoRefreshKey, setSaldoRefreshKey] = useState(0);
+  const bumpSaldo = () => setSaldoRefreshKey((k) => k + 1);
+
   const { token, user } = session;
   const usuarioEmail = user?.email || user;
 
+  // “Hoy” en Europe/Madrid
   const hoyISO = yyyymmddTZ(new Date());
 
+  // Cargar resumen + meta (usa cliente api -> evita /api/api y mixed content)
   const cargarResumenFichajes = useCallback(async () => {
     setCargandoResumen(true);
     try {
@@ -71,6 +83,7 @@ export default function EmpleadoPanel({ session, onLogout }) {
 
   const tieneFuturos = Array.isArray(meta?.fichajes_futuros) && meta.fichajes_futuros.length > 0;
 
+  // Fichar (FormData + auto-refresh con api.postForm)
   const fichar = async (tipo) => {
     if (tieneFuturos) {
       toast.error('⛔ Fichaje bloqueado por fichajes futuros. Corrige primero.');
@@ -80,9 +93,12 @@ export default function EmpleadoPanel({ session, onLogout }) {
     try {
       const form = new FormData();
       form.append('tipo', tipo);
+
       await api.postForm('/fichar', form, token);
+
       toast.success(tipo === 'entrada' ? '✅ Entrada registrada' : '✅ Salida registrada');
       await cargarResumenFichajes();
+      bumpSaldo(); // refresca widget de saldo
     } catch (e) {
       toast.error(`❌ ${e?.message || 'Error al fichar'}`);
     } finally {
@@ -92,6 +108,7 @@ export default function EmpleadoPanel({ session, onLogout }) {
 
   useEffect(() => { cargarResumenFichajes(); }, [cargarResumenFichajes]);
 
+  // ⏱️ Ticker “tiempo trabajado hoy” (todo en Madrid)
   useEffect(() => {
     const interval = setInterval(() => {
       const totalHoyBase = (resumenFichajes[hoyISO]?.total) || 0;
@@ -101,6 +118,7 @@ export default function EmpleadoPanel({ session, onLogout }) {
         const inicio = parseISO(abiertoIso);
         const abiertoDiaISO = yyyymmddTZ(inicio);
         const esDeHoy = (abiertoDiaISO === hoyISO);
+
         const extra = esDeHoy ? Math.max(0, Math.floor((Date.now() - inicio.getTime()) / 1000)) : 0;
         setTiempoHoy(totalHoyBase + extra);
         setEstadoActual('fichado');
@@ -123,6 +141,12 @@ export default function EmpleadoPanel({ session, onLogout }) {
   };
 
   const hayAbierto = !!meta?.turno_abierto?.desde;
+
+  // === util: quedarnos solo con fichajes reales (no bloques de “ausencia”) ===
+  const soloBloquesTrabajo = (bloques = []) =>
+    bloques.filter(
+      (b) => !b?.ausencia && (b?.entrada || b?.salida || (typeof b?.duracion === 'number' && b.duracion > 0))
+    );
 
   return (
     <div
@@ -209,13 +233,13 @@ export default function EmpleadoPanel({ session, onLogout }) {
 
             <div className="mt-4 text-sm text-gray-800 space-y-2">
               <p>⏰ <strong>Tiempo trabajado hoy:</strong> {formatSegundos(tiempoHoy)}</p>
-              {(resumenFichajes[hoyISO]?.bloques || []).map((b, i) => (
+              {soloBloquesTrabajo(bloquesHoy).map((b, i) => (
                 <FichajeBloque key={i} entrada={b.entrada} salida={b.salida} duracion={b.duracion} anomalia={b.anomalia}/>
               ))}
             </div>
           </section>
 
-          {/* === Atajos Ausencias & Vacaciones (sin widget; enlace a Saldos) === */}
+          {/* === Atajos Ausencias & Vacaciones + Saldo === */}
           <section className="rounded-2xl bg-white/60 backdrop-blur-md border border-white/40 shadow p-5">
             <div className="flex items-center justify-between mb-4">
               <h3 className="text-lg font-semibold text-[#004B87]">Ausencias y Vacaciones</h3>
@@ -232,15 +256,10 @@ export default function EmpleadoPanel({ session, onLogout }) {
                 >
                   📄 Mis solicitudes
                 </button>
-                <button
-                  onClick={() => navigate("/ausencias?tab=saldos")}
-                  className="px-3 py-2 rounded-lg bg-slate-200 hover:bg-slate-300 text-slate-800"
-                  title="Ver mis saldos de vacaciones/LD"
-                >
-                  💼 Saldos
-                </button>
               </div>
             </div>
+            {/* Widget de saldo; se refresca tras fichar via key */}
+            <SaldoVacacionesWidget key={saldoRefreshKey} />
           </section>
 
           {/* === Solicitud de fichaje manual === */}
@@ -266,8 +285,13 @@ export default function EmpleadoPanel({ session, onLogout }) {
             </div>
 
             {mostrarResumen && (() => {
+              // Filtrar días: solo aquellos con fichajes reales (ignorar días de solo ausencias)
               const diasConBloques = Object.entries(resumenFichajes || {})
-                .filter(([k, d]) => k !== '_meta' && Array.isArray(d?.bloques))
+                .filter(([k, d]) =>
+                  k !== '_meta' &&
+                  Array.isArray(d?.bloques) &&
+                  soloBloquesTrabajo(d.bloques).length > 0
+                )
                 .sort(([a], [b]) => new Date(b) - new Date(a));
 
               const totalPaginas = Math.max(1, Math.ceil(diasConBloques.length / porPagina));
@@ -289,7 +313,7 @@ export default function EmpleadoPanel({ session, onLogout }) {
                         📅 {fmtFechaISO(`${fecha}T00:00:00Z`)}
                       </h4>
                       <div className="space-y-4">
-                        {bloques.map((b, i) => (
+                        {soloBloquesTrabajo(bloques).map((b, i) => (
                           <FichajeBloque key={i} entrada={b.entrada} salida={b.salida} duracion={b.duracion} anomalia={b.anomalia}/>
                         ))}
                       </div>
