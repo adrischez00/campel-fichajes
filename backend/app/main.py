@@ -1,7 +1,10 @@
 # backend/app/main.py
 import os
-from typing import List
+import re
+from typing import List, Optional
+from datetime import datetime
 
+import pytz
 from fastapi import FastAPI, Depends, HTTPException, status, Header, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
@@ -22,7 +25,6 @@ from app.routes import ausencias as ausencias_router
 from app.auth import get_current_user
 
 # ---------------- Bootstrapping DB ----------------
-# Nota: mantenemos create_all porque ya lo usas. (Si tienes migraciones aparte, podemos desactivarlo.)
 Base.metadata.create_all(bind=engine)
 
 # ---------------- App ----------------
@@ -37,8 +39,6 @@ def health():
 app.add_api_route("/api/health", health, methods=["GET"])
 
 # ---------------- CORS (Cloudflare Pages + previews + localhost) ----------------
-from fastapi.middleware.cors import CORSMiddleware
-
 STATIC_ALLOWED = [
     "https://sistema-fichajes.pages.dev",
     "https://campel-fichajes.pages.dev",
@@ -65,13 +65,24 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
     allow_origin_regex=PAGES_PREVIEWS_REGEX,
-    allow_credentials=True,                          # ← cookies httpOnly / Authorization
+    allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
-    expose_headers=["Content-Disposition"],          # opcional (para descargas)
+    expose_headers=["Content-Disposition"],
     max_age=600,
 )
 
+# ---------------- Zona horaria + helper ----------------
+TZ_MADRID = pytz.timezone("Europe/Madrid")
+
+def _safe_iso(dt: Optional[datetime]) -> Optional[str]:
+    if not dt:
+        return None
+    if dt.tzinfo is None:
+        dt = TZ_MADRID.localize(dt)
+    else:
+        dt = dt.astimezone(TZ_MADRID)
+    return dt.isoformat()
 
 # ---------------- Modelos de entrada ----------------
 class SolicitudManualIn(BaseModel):
@@ -153,7 +164,61 @@ def fichar_handler(
     db: Session = Depends(get_db),
     usuario: User = Depends(get_current_user)
 ):
-    return crud.crear_fichaje(db, tipo, usuario)
+    try:
+        # Estado previo: ¿había una ENTRADA abierta?
+        ultimo_antes = (
+            db.query(models.Fichaje)
+            .filter(models.Fichaje.user_id == usuario.id)
+            .order_by(models.Fichaje.timestamp.desc())
+            .first()
+        )
+        era_entrada_abierta = bool(ultimo_antes and (ultimo_antes.tipo or "").lower() == "entrada")
+        ultima_entrada_ts = ultimo_antes.timestamp if era_entrada_abierta else None
+
+        # Crear fichaje (el CRUD ya hace autocierre si aplica)
+        fich = crud.crear_fichaje(db, tipo, usuario)
+
+        # Meta: ¿se aplicó autocierre por solicitud de SALIDA?
+        auto_aplicado, solicitud_id, cerrado_en = False, None, None
+        if (tipo or "").lower() == "entrada" and era_entrada_abierta and ultima_entrada_ts:
+            pat = re.compile(r"\[auto-cierre por solicitud #(\d+)\]")
+            salidas = (
+                db.query(models.Fichaje)
+                .filter(
+                    models.Fichaje.user_id == usuario.id,
+                    models.Fichaje.tipo == "salida",
+                    models.Fichaje.is_manual == True,
+                    models.Fichaje.timestamp >= ultima_entrada_ts,
+                )
+                .order_by(models.Fichaje.timestamp.asc())
+                .all()
+            )
+            for f in salidas:
+                m = pat.search((getattr(f, "motivo", "") or ""))
+                if m:
+                    auto_aplicado = True
+                    solicitud_id = int(m.group(1))
+                    cerrado_en = _safe_iso(f.timestamp)
+                    break
+
+        return {
+            "ok": True,
+            "fichaje": {
+                "id": fich.id,
+                "tipo": fich.tipo,
+                "timestamp": _safe_iso(fich.timestamp),
+                "is_manual": bool(getattr(fich, "is_manual", False)),
+            },
+            "auto_cierre": {
+                "aplicado": auto_aplicado,
+                "solicitud_id": solicitud_id,
+                "cerrado_en": cerrado_en,
+            },
+        }
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Error interno al fichar")
 
 def obtener_fichajes_handler(usuario: str = Header(...), db: Session = Depends(get_db)):
     user = crud.obtener_usuario_por_email(db, usuario)
@@ -213,11 +278,10 @@ def exportar_handler(usuario: str, db: Session = Depends(get_db)):
     return utils.exportar_pdf(user.email, fichajes)
 
 # ==================== MONTAJE CANÓNICO (/api) ====================
-# Routers funcionales (todos bajo /api)
 app.include_router(auth_routes.router,     prefix="/api/auth", tags=["auth"])
-app.include_router(calendar.router,         prefix="/api", tags=["calendar"])
-app.include_router(ausencias_router.router, prefix="/api")          # router ya tiene prefix="/ausencias"
-app.include_router(logs_router.router,      prefix="/api/logs")     # logs bajo /api/logs
+app.include_router(calendar.router,        prefix="/api", tags=["calendar"])
+app.include_router(ausencias_router.router, prefix="/api")
+app.include_router(logs_router.router,     prefix="/api/logs")
 
 # ---------------- LOGIN JSON (compatibilidad frontend) ----------------
 class LoginJSON(BaseModel):
@@ -235,7 +299,7 @@ def login_json(body: LoginJSON, db: Session = Depends(get_db)):
     token = auth.crear_token_acceso({"sub": user.email, "role": user.role})
     return {"access_token": token, "token_type": "bearer"}
 
-# Endpoints que estaban en main -> ahora canónicos bajo /api
+# Endpoints canónicos
 app.add_api_route("/api/registrar",             registrar_handler,             methods=["POST"])
 app.add_api_route("/api/usuarios",              listar_usuarios_handler,       methods=["GET"], response_model=List[UserOut])
 app.add_api_route("/api/usuarios/{usuario_id}", actualizar_usuario_handler,    methods=["PUT"])
@@ -251,9 +315,6 @@ app.add_api_route("/api/resolver-solicitud",    resolver_solicitud_handler,    m
 app.add_api_route("/api/exportar-pdf",          exportar_handler,              methods=["GET"])
 
 # ==================== REDIRECTS LEGACY (sin /api -> /api) ====================
-# Nota: 307 conserva método y body en POST/PUT/DELETE.
-
-# Auth
 @app.api_route("/login", methods=["POST"], include_in_schema=False)
 def legacy_login_redirect():
     return RedirectResponse(url="/api/auth/login", status_code=307)
