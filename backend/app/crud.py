@@ -107,6 +107,70 @@ def _instante_en_parcial(a: Ausencia, t: datetime, tz=TZ_MADRID) -> bool:
     return ini <= t <= fin
 
 
+# === NUEVO: autocerrar turno abierto con solicitud de SALIDA (pendiente/aprobada)
+def _autocerrar_turno_con_solicitud_salida(db: Session, usuario: models.User, ultima_entrada_dt: datetime):
+    """
+    Si existe una solicitud manual (pendiente o aprobada) de SALIDA con timestamp
+    >= ultima_entrada_dt, crea un fichaje de salida is_manual en ese instante y lo devuelve.
+    Además, marca la solicitud como 'aprobada' si estaba 'pendiente'.
+    """
+    sol = (
+        db.query(models.SolicitudManual)
+        .filter(
+            models.SolicitudManual.user_id == usuario.id,
+            models.SolicitudManual.tipo.ilike("salida"),
+            models.SolicitudManual.estado.in_(["pendiente", "aprobada"]),
+            models.SolicitudManual.timestamp >= ultima_entrada_dt,
+            models.SolicitudManual.timestamp <= datetime.now(TZ_MADRID),
+        )
+        .order_by(models.SolicitudManual.timestamp.asc())
+        .first()
+    )
+    if not sol:
+        return None
+
+    ts = _ensure_aware(sol.timestamp, TZ_MADRID)
+
+    # Evitar duplicados exactos
+    ya = (
+        db.query(models.Fichaje)
+        .filter(
+            models.Fichaje.user_id == usuario.id,
+            models.Fichaje.tipo == "salida",
+            models.Fichaje.timestamp == ts,
+        )
+        .first()
+    )
+    if ya:
+        # Asegura que la solicitud queda aprobada si la salida ya existía
+        if (sol.estado or "").lower() == "pendiente":
+            sol.estado = "aprobada"
+            db.add(sol)
+            db.commit()
+        return ya
+
+    hash_val = generar_hash_fichaje(usuario.email, "salida", ts.isoformat())
+    fich = models.Fichaje(
+        tipo="salida",
+        timestamp=ts,
+        hash=hash_val,
+        usuario=usuario,
+        is_manual=True,
+        motivo=f"[auto-cierre por solicitud #{sol.id}] {sol.motivo or ''}".strip(),
+    )
+    db.add(fich)
+
+    # Marcar aprobada si estaba pendiente
+    if (sol.estado or "").lower() == "pendiente":
+        sol.estado = "aprobada"
+        db.add(sol)
+
+    log_evento(db, usuario, "fichaje", "salida (auto-cierre por solicitud)")
+    db.commit()
+    db.refresh(fich)
+    return fich
+
+
 def crear_fichaje(db: Session, tipo: str, usuario: models.User):
     tipo_norm = (tipo or "").strip().lower()
     if tipo_norm not in _VALID_TIPOS:
@@ -133,19 +197,44 @@ def crear_fichaje(db: Session, tipo: str, usuario: models.User):
             detalle = " - ".join(rango) if rango else "tramo parcial"
             raise ValueError(f"❌ No puedes fichar dentro de una ausencia parcial aprobada ({detalle}).")
 
-    # VALIDACIÓN: no permitir dos entradas o dos salidas consecutivas
+    # Último fichaje registrado
     ultimo = (
         db.query(models.Fichaje)
         .filter(models.Fichaje.user_id == usuario.id)
         .order_by(models.Fichaje.timestamp.desc())
         .first()
     )
-    if ultimo and (ultimo.tipo or "").lower() == tipo_norm:
-        raise ValueError(f"❌ Ya existe un fichaje de tipo '{tipo_norm}' justo antes. No se permiten fichajes consecutivos del mismo tipo.")
 
-    # VALIDACIÓN: si tipo == salida, debe haber entrada previa
-    if tipo_norm == "salida" and (not ultimo or (ultimo.tipo or "").lower() != "entrada"):
-        raise ValueError("❌ No puedes fichar salida sin una entrada previa.")
+    # No permitir dos del mismo tipo… salvo la EXCEPCIÓN para ENTRADA con solicitud de SALIDA
+    if ultimo and (ultimo.tipo or "").lower() == tipo_norm:
+        if tipo_norm == "entrada" and (ultimo.tipo or "").lower() == "entrada":
+            # Intentar autocierre con solicitud de salida
+            cerrada = _autocerrar_turno_con_solicitud_salida(
+                db, usuario, _ensure_aware(ultimo.timestamp, TZ_MADRID)
+            )
+            if cerrada:
+                # Recalcular el último para continuar el flujo
+                ultimo = (
+                    db.query(models.Fichaje)
+                    .filter(models.Fichaje.user_id == usuario.id)
+                    .order_by(models.Fichaje.timestamp.desc())
+                    .first()
+                )
+            else:
+                raise ValueError("❌ Ya tienes un turno abierto. Solicita primero una SALIDA manual (pendiente o aprobada) para cerrarlo.")
+        else:
+            raise ValueError(f"❌ Ya existe un fichaje de tipo '{tipo_norm}' justo antes. No se permiten fichajes consecutivos del mismo tipo.")
+
+    # Si tipo == salida, debe haber alguna ENTRADA previa en el histórico
+    if tipo_norm == "salida":
+        tiene_entrada_previa = (
+            db.query(models.Fichaje)
+            .filter(models.Fichaje.user_id == usuario.id, models.Fichaje.tipo == "entrada")
+            .first()
+            is not None
+        )
+        if not tiene_entrada_previa:
+            raise ValueError("❌ No puedes fichar salida sin una entrada previa.")
 
     hash_val = generar_hash_fichaje(usuario.email, tipo_norm, ahora.isoformat())
     fichaje = models.Fichaje(tipo=tipo_norm, timestamp=ahora, hash=hash_val, usuario=usuario)
@@ -295,7 +384,7 @@ def listar_solicitudes(db: Session):
 def aprobar_solicitud(db: Session, solicitud_id: int, admin: models.User, ip: Optional[str] = None):
     """
     Aprueba una solicitud creando el fichaje manual correspondiente,
-    rellenando auditoría y registrando log.
+    rellenando auditoría y registrando log. No duplica si ya existe (p. ej. por autocierre).
     """
     s = db.query(models.SolicitudManual).filter(models.SolicitudManual.id == solicitud_id).first()
     if not s:
@@ -306,47 +395,53 @@ def aprobar_solicitud(db: Session, solicitud_id: int, admin: models.User, ip: Op
     # Convertir siempre a datetime con zona horaria
     ts = _parse_fecha_hora(s.fecha, s.hora, TZ_MADRID)
 
-    # Validaciones de coherencia
-    fichajes_usuario = (
+    # Evitar duplicar si ya existe ese fichaje (pudo crearse por autocierre)
+    ya = (
         db.query(models.Fichaje)
-        .filter(models.Fichaje.user_id == s.usuario.id)
-        .order_by(models.Fichaje.timestamp)
-        .all()
+        .filter(
+            models.Fichaje.user_id == s.usuario.id,
+            models.Fichaje.tipo == s.tipo.lower(),
+            models.Fichaje.timestamp == ts,
+        )
+        .first()
     )
 
-    if s.tipo == "salida":
-        for f in reversed(fichajes_usuario):
-            if (f.tipo or "").lower() == "entrada":
-                f_ts = _ensure_aware(f.timestamp, TZ_MADRID)
-                if ts < f_ts:
-                    raise ValueError("❌ La hora de salida no puede ser anterior a la entrada previa.")
-                break
+    if not ya:
+        # Coherencia mínima con histórico (solo exigente para SALIDA)
+        if (s.tipo or "").lower() == "salida":
+            entrada_ok = (
+                db.query(models.Fichaje)
+                .filter(
+                    models.Fichaje.user_id == s.usuario.id,
+                    models.Fichaje.tipo == "entrada",
+                    models.Fichaje.timestamp <= ts,
+                )
+                .order_by(models.Fichaje.timestamp.desc())
+                .first()
+            )
+            if not entrada_ok:
+                raise ValueError("❌ No hay una entrada previa válida para esa salida.")
 
-    if s.tipo == "entrada":
-        for f in reversed(fichajes_usuario):
-            if (f.tipo or "").lower() == "salida":
-                f_ts = _ensure_aware(f.timestamp, TZ_MADRID)
-                if ts < f_ts:
-                    raise ValueError("❌ La hora de entrada no puede ser anterior a la salida previa.")
-                break
+        # Crear fichaje manual
+        hash_val = generar_hash_fichaje(s.usuario.email, (s.tipo or "").lower(), ts.isoformat())
+        fichaje = models.Fichaje(
+            tipo=(s.tipo or "").lower(),
+            timestamp=ts,
+            hash=hash_val,
+            usuario=s.usuario,
+            is_manual=True,
+            motivo=s.motivo,
+        )
+        db.add(fichaje)
 
-    # Crear fichaje manual
-    hash_val = generar_hash_fichaje(s.usuario.email, s.tipo, ts.isoformat())
-    fichaje = models.Fichaje(
-        tipo=(s.tipo or "").lower(),
-        timestamp=ts,
-        hash=hash_val,
-        usuario=s.usuario,
-        is_manual=True,
-        motivo=s.motivo,
-    )
-    db.add(fichaje)
-
-    # Auditoría en solicitud (si los campos existen, se persisten; si no, no rompen)
+    # Auditoría en solicitud (solo si el modelo tiene esos campos)
     s.estado = "aprobada"
-    s.gestionado_por_id = admin.id if admin else None
-    s.gestionado_en = datetime.now(pytz.UTC)
-    s.ip_origen = ip
+    if admin and hasattr(s, "gestionado_por_id"):
+        s.gestionado_por_id = admin.id
+    if hasattr(s, "gestionado_en"):
+        s.gestionado_en = datetime.now(pytz.UTC)
+    if hasattr(s, "ip_origen"):
+        s.ip_origen = ip
 
     log_evento(db, s.usuario, "fichaje manual aprobado", f"{ts.strftime('%d/%m/%Y %H:%M:%S')}|{s.motivo}")
 
@@ -365,10 +460,14 @@ def rechazar_solicitud(db: Session, solicitud_id: int, admin: models.User, motiv
         raise ValueError("La solicitud ya fue gestionada")
 
     s.estado = "rechazada"
-    s.motivo_rechazo = motivo if motivo else None
-    s.gestionado_por_id = admin.id if admin else None
-    s.gestionado_en = datetime.now(pytz.UTC)
-    s.ip_origen = ip
+    if hasattr(s, "motivo_rechazo"):
+        s.motivo_rechazo = motivo if motivo else None
+    if admin and hasattr(s, "gestionado_por_id"):
+        s.gestionado_por_id = admin.id
+    if hasattr(s, "gestionado_en"):
+        s.gestionado_en = datetime.now(pytz.UTC)
+    if hasattr(s, "ip_origen"):
+        s.ip_origen = ip
 
     log_evento(db, s.usuario, "fichaje manual rechazado", s.motivo)
 
@@ -526,7 +625,7 @@ def resumen_fichajes_usuario(db: Session, usuario: models.User):
         pendiente = None
         total_segundos = 0
 
-        # ---- intervalos de trabajo ----
+        # ---- intervalos de trabajo (solo fichajes reales) ----
         for f in sorted(lista, key=lambda x: x.timestamp):
             try:
                 ts = _ensure_aware(f.timestamp, TZ_MADRID)
@@ -575,7 +674,7 @@ def resumen_fichajes_usuario(db: Session, usuario: models.User):
                 "is_manual": getattr(pendiente, "is_manual", False)
             }
 
-        # ---- integrar AUSENCIAS del día (rellenando huecos, sin doble conteo) ----
+        # ---- AUSENCIAS retribuidas del día (NO añadimos bloques de ausencia a la UI) ----
         dia_dt = datetime.strptime(dia, "%Y-%m-%d").date()
 
         # Construir intervalos de trabajo del día para obtener huecos
@@ -591,47 +690,33 @@ def resumen_fichajes_usuario(db: Session, usuario: models.User):
         # Ausencias que afectan al día
         aus_dia = [a for a in aus_aprob if a.fecha_fin >= dia_dt and a.fecha_inicio <= dia_dt]
 
-        # 3.1 Construir la UNIÓN de tramos retribuidos (intersecciones con huecos)
+        # Construir la UNIÓN de tramos retribuidos (intersecciones con huecos)
         tramos_retribuibles = []
         existe_retribuida_dia_completo = False  # p.ej. vacaciones completas
 
         for a in aus_dia:
-            # tramo de ausencia acotado al día
             a_ini, a_fin = _tramo_ausencia_en_dia(a, dia_dt, TZ_MADRID)
 
             if a.retribuida:
-                # Intersectar ausencia con cada hueco para evitar doble cómputo
                 for h_ini, h_fin in huecos:
                     ini = max(_ensure_aware(a_ini), _ensure_aware(h_ini))
                     fin = min(_ensure_aware(a_fin), _ensure_aware(h_fin))
                     if fin > ini:
                         tramos_retribuibles.append((ini, fin))
 
-                # Marcar si hay retribuida de día completo
                 if not a.parcial:
                     existe_retribuida_dia_completo = True
 
-            # Añadir bloque informativo a la UI (duración temporal, no suma)
-            bloques.append({
-                "entrada": None,
-                "salida": None,
-                "duracion": 0,  # si quieres, puedes recalcular por ausencia para UI
-                "anomalia": None,
-                "ausencia": True,
-                "tipo_ausencia": a.tipo,
-                "subtipo": a.subtipo,
-                "retribuida": bool(a.retribuida),
-                "parcial": bool(a.parcial),
-            })
+            # ⚠️ NO añadimos bloques "ausencia" a `bloques` (UI muestra solo trabajo real)
 
-        # 3.2 Segundos retribuidos por la unión de tramos
+        # Segundos retribuidos por la unión de tramos
         aus_retrib_seg = _sumar_union_intervalos(tramos_retribuibles)
 
-        # 3.3 Relleno hasta jornada completa SOLO por el componente retribuido (no por trabajo real)
+        # Relleno hasta jornada completa SOLO por el componente retribuido
         objetivo = int(HORAS_JORNADA_COMPLETA * 3600)
         if existe_retribuida_dia_completo:
             falta_para_jornada = max(0, objetivo - int(total_segundos + aus_retrib_seg))
-            aus_retrib_seg += falta_para_jornada  # rellena pero NUNCA supera jornada por la parte retribuida
+            aus_retrib_seg += falta_para_jornada
 
         resumen[dia] = {
             "total": int(total_segundos),                       # solo fichajes reales
@@ -640,11 +725,32 @@ def resumen_fichajes_usuario(db: Session, usuario: models.User):
             "total_computado": int(total_segundos) + int(aus_retrib_seg)  # real + retribuidas
         }
 
+    # Señal para la UI: ¿hay solicitud de SALIDA válida para autocerrar el turno abierto?
+    puede_autocerrar = False
+    if turno_abierto and turno_abierto.get("desde"):
+        try:
+            desde_dt = _ensure_aware(datetime.fromisoformat(turno_abierto["desde"]), TZ_MADRID)
+            existe = (
+                db.query(models.SolicitudManual)
+                .filter(
+                    models.SolicitudManual.user_id == usuario.id,
+                    models.SolicitudManual.tipo.ilike("salida"),
+                    models.SolicitudManual.estado.in_(["pendiente", "aprobada"]),
+                    models.SolicitudManual.timestamp >= desde_dt,
+                    models.SolicitudManual.timestamp <= datetime.now(TZ_MADRID),
+                )
+                .first()
+            )
+            puede_autocerrar = bool(existe)
+        except Exception:
+            puede_autocerrar = False
+
     return {
         "resumen": resumen,
         "_meta": {
             "turno_abierto": turno_abierto,
-            "fichajes_futuros": fichajes_futuros
+            "fichajes_futuros": fichajes_futuros,
+            "puede_autocerrar": puede_autocerrar,
         }
     }
 
