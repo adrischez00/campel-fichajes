@@ -56,10 +56,7 @@ export default function EmpleadoPanel({ session, onLogout }) {
       setMeta(metaRx);
 
       if (metaRx?.turno_abierto?.desde) {
-        const msg = metaRx?.puede_autocerrar
-          ? `Tienes un turno abierto ${formateaAviso(metaRx.turno_abierto.desde)}. Puedes fichar ENTRADA: se autocerrará con tu solicitud de SALIDA.`
-          : `Tienes un turno abierto ${formateaAviso(metaRx.turno_abierto.desde)}. Puedes fichar SALIDA ahora o enviar una solicitud manual.`;
-        toast.warning(msg, { autoClose: 7000 });
+        toast.warning(`Tienes un turno abierto ${formateaAviso(metaRx.turno_abierto.desde)}.`, { autoClose: 7000 });
       }
       if (Array.isArray(metaRx?.fichajes_futuros) && metaRx.fichajes_futuros.length > 0) {
         toast.error('⚠️ Se han detectado fichajes con fecha FUTURA. Corrige antes de continuar.', { autoClose: 10000 });
@@ -128,7 +125,6 @@ export default function EmpleadoPanel({ session, onLogout }) {
   };
 
   const hayAbierto = !!meta?.turno_abierto?.desde;
-  const puedeAutocerrar = !!meta?.puede_autocerrar;
 
   return (
     <div
@@ -166,38 +162,23 @@ export default function EmpleadoPanel({ session, onLogout }) {
                   🕒 Tienes un turno abierto {formateaAviso(meta.turno_abierto.desde)}
                 </div>
                 <div className="text-sm text-gray-700">
-                  {!puedeAutocerrar ? (
-                    <>Puedes fichar <b>salida ahora</b> o enviar una <b>solicitud manual</b> con la hora real.</>
-                  ) : (
-                    <>
-                      Puedes <b>fichar ENTRADA</b>: cerraremos automáticamente el turno anterior
-                      usando tu <b>solicitud de SALIDA</b>, y abriremos la nueva entrada.
-                    </>
-                  )}
+                  Puedes fichar <b>salida ahora</b> o enviar una <b>solicitud manual</b> con la hora real.
                 </div>
               </div>
             )}
 
             <div className="flex gap-4 flex-wrap">
               <button
-                disabled={loadingFichar || (hayAbierto && !puedeAutocerrar) || tieneFuturos}
+                disabled={loadingFichar || hayAbierto || tieneFuturos}
                 onClick={() => fichar('entrada')}
                 className={`flex items-center gap-2 px-6 py-3 rounded-2xl text-base font-semibold text-white shadow-md transition-all duration-200 ${
-                  ((hayAbierto && !puedeAutocerrar) || tieneFuturos)
+                  (hayAbierto || tieneFuturos)
                     ? 'bg-gray-400 cursor-not-allowed'
                     : 'bg-gradient-to-r from-green-500 to-green-600 hover:scale-[1.03]'
                 }`}
-                title={
-                  tieneFuturos
-                    ? 'Bloqueado por fichaje futuro'
-                    : (hayAbierto
-                        ? (puedeAutocerrar
-                            ? 'Autocerrará el turno previo con tu solicitud de salida'
-                            : 'Ya tienes un turno abierto')
-                        : 'Fichar entrada')
-                }
+                title={tieneFuturos ? 'Bloqueado por fichaje futuro' : (hayAbierto ? 'Ya tienes un turno abierto' : 'Fichar entrada')}
               >
-                {hayAbierto && puedeAutocerrar ? '🟢 Fichar entrada (autocerrar)' : '🟢 Fichar entrada'}
+                🟢 Fichar entrada
               </button>
 
               <button
@@ -288,11 +269,16 @@ export default function EmpleadoPanel({ session, onLogout }) {
 
             {mostrarResumen && (() => {
               const diasConBloques = Object.entries(resumenFichajes || {})
-                .filter(([k, d]) =>
-                  k !== '_meta' &&
-                  Array.isArray(d?.bloques) &&
-                  new Date(`${k}T00:00:00Z`) <= hoyDate // ⬅️ solo hasta hoy
-                )
+                .filter(([k, d]) => {
+                  if (k === '_meta') return false;
+                  if (!Array.isArray(d?.bloques)) return false;
+                  // solo hasta hoy
+                  if (new Date(`${k}T00:00:00Z`) > hoyDate) return false;
+                  // incluir solo días con trabajo real (no “días de ausencia” vacíos)
+                  return d.bloques.some(
+                    (b) => b && !b.ausencia && (b.entrada || b.salida || Number.isFinite(b.duracion))
+                  );
+                })
                 .sort(([a], [b]) => new Date(b) - new Date(a));
 
               const totalPaginas = Math.max(1, Math.ceil(diasConBloques.length / porPagina));
