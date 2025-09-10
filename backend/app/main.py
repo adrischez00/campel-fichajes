@@ -278,26 +278,10 @@ def exportar_handler(usuario: str, db: Session = Depends(get_db)):
     return utils.exportar_pdf(user.email, fichajes)
 
 # ==================== MONTAJE CANÓNICO (/api) ====================
-app.include_router(auth_routes.router,     prefix="/api/auth", tags=["auth"])
+app.include_router(auth_routes.router,     prefix="/api", tags=["auth"])
 app.include_router(calendar.router,        prefix="/api", tags=["calendar"])
 app.include_router(ausencias_router.router, prefix="/api")
 app.include_router(logs_router.router,     prefix="/api/logs")
-
-# ---------------- LOGIN JSON (compatibilidad frontend) ----------------
-class LoginJSON(BaseModel):
-    email: str
-    password: str
-
-@app.post("/api/auth/login-json")
-def login_json(body: LoginJSON, db: Session = Depends(get_db)):
-    user = crud.autenticar_usuario(db, body.email, body.password)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Credenciales incorrectas"
-        )
-    token = auth.crear_token_acceso({"sub": user.email, "role": user.role})
-    return {"access_token": token, "token_type": "bearer"}
 
 # Endpoints canónicos
 app.add_api_route("/api/registrar",             registrar_handler,             methods=["POST"])
@@ -314,14 +298,7 @@ app.add_api_route("/api/solicitudes",           listar_solicitudes_handler,    m
 app.add_api_route("/api/resolver-solicitud",    resolver_solicitud_handler,    methods=["POST"])
 app.add_api_route("/api/exportar-pdf",          exportar_handler,              methods=["GET"])
 
-# ==================== REDIRECTS LEGACY (sin /api -> /api) ====================
-@app.api_route("/login", methods=["POST"], include_in_schema=False)
-def legacy_login_redirect():
-    return RedirectResponse(url="/api/auth/login", status_code=307)
-
-@app.api_route("/auth/login", methods=["POST"], include_in_schema=False)
-def legacy_auth_login_redirect():
-    return RedirectResponse(url="/api/auth/login", status_code=307)
+app.include_router(auth_routes.legacy, prefix="/api")
 
 # Usuarios
 @app.api_route("/registrar", methods=["POST"], include_in_schema=False)
