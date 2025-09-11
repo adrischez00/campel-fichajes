@@ -17,15 +17,11 @@ from app.config import HORAS_JORNADA_COMPLETA
 from app.models import Ausencia, LogAuditoria
 from app.schemas_ausencias import AusenciaCreate, AusenciaUpdate
 
-# ========================
-#  Zona horaria
-# ========================
+
+# ======================== TZ & helpers ========================
 TZ_MADRID = pytz.timezone("Europe/Madrid")
 _VALID_TIPOS = {"entrada", "salida"}
 
-# ========================
-#  Helpers
-# ========================
 def _ensure_aware(dt: Optional[datetime], tz=TZ_MADRID) -> Optional[datetime]:
     if dt is None:
         return None
@@ -37,14 +33,8 @@ def _safe_iso(dt: Optional[datetime]) -> Optional[str]:
     dt = _ensure_aware(dt)
     return dt.isoformat() if dt else None
 
-# ========================
-#  Usuarios
-# ========================
-
+# ======================== Usuarios ========================
 def obtener_usuario_por_email(db: Session, email: str):
-    """
-    Búsqueda robusta: case-insensitive y trim en BD y en la entrada.
-    """
     if not email:
         return None
     e = (email or "").strip()

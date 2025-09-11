@@ -12,6 +12,7 @@ from app.auth import (
     verificar_password,
     crear_token_acceso,
     decodificar_token,
+    pwd_context,   # para debug opcional
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -67,26 +68,15 @@ def _safe_verify(plain: str, hashed: str) -> bool:
 def _login(db: Session, username_or_email: str, password: str, response: Response):
     user = obtener_usuario_por_email(db, username_or_email)
     if not user:
-        raise HTTPException(status_code=401, detail="usuario_no_encontrado")
-
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
     hashed = (
         getattr(user, "hashed_password", None)
         or getattr(user, "password_hash", None)
         or getattr(user, "password", None)
     )
-    if not hashed:
-        raise HTTPException(status_code=401, detail="sin_hash_en_bd")
-
-    try:
-        ok = verificar_password(password, hashed)
-    except Exception:
-        ok = False
-
-    if not ok:
-        raise HTTPException(status_code=401, detail="password_incorrecto")
-
+    if not hashed or not _safe_verify(password, hashed):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
     return _token_response(user, response)
-
 
 # ================= Endpoints =================
 @router.post("/login", summary="Login (form-urlencoded: username, password)")
@@ -129,7 +119,7 @@ def refresh(request: Request, response: Response):
         raise HTTPException(status_code=401, detail="Refresh inválido")
     email = data["sub"]
     new_access = _issue_access(email)
-    new_refresh = _issue_refresh(email)
+    new_refresh = _issue_refresh(email)  # rotación
     _set_refresh_cookie(response, new_refresh)
     return {"access_token": new_access, "token_type": "bearer"}
 
@@ -143,7 +133,7 @@ def logout(response: Response):
     )
     return {"ok": True}
 
-# Aliases legacy
+# ===== Aliases legacy =====
 @legacy.post("/login")
 def legacy_login(response: Response, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     return _login(db, form.username, form.password, response)
@@ -151,4 +141,26 @@ def legacy_login(response: Response, form: OAuth2PasswordRequestForm = Depends()
 @legacy.post("/login/token")
 def legacy_login_token(response: Response, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     return _login(db, form.username, form.password, response)
+
+# ===== Debug opcional (quítalos cuando termines) =====
+@router.get("/debug-crypto")
+def debug_crypto():
+    try:
+        import bcrypt as _bc
+        bver = getattr(_bc, "__version__", "present")
+    except Exception as e:
+        bver = f"ERROR: {e!r}"
+    return {"schemes": list(pwd_context.schemes()), "bcrypt": bver}
+
+class _VerifyBody(BaseModel):
+    password: str
+    hashed: str
+
+@router.post("/debug-verify")
+def debug_verify(b: _VerifyBody):
+    try:
+        ok = verificar_password(b.password, b.hashed)
+        return {"ok": ok}
+    except Exception as e:
+        return {"ok": False, "error": repr(e)}
 
