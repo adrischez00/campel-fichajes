@@ -1,4 +1,3 @@
-# backend/app/main.py
 import os
 import re
 from typing import List, Optional
@@ -14,7 +13,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.routes import auth as auth_routes
-from app import database, crud, auth, utils, models
+from app import crud, auth, utils, models
 from app.database import engine, get_db
 from app.models import Base, User
 from app.schemas import UserOut, UsuarioUpdate, UsuarioPassword
@@ -35,16 +34,13 @@ app = FastAPI(redirect_slashes=False)
 def health():
     return {"ok": True}
 
-# Alias canónico /api/health
 app.add_api_route("/api/health", health, methods=["GET"])
 
-# ---------------- CORS (Cloudflare Pages + previews + localhost) ----------------
+# ---------------- CORS ----------------
 STATIC_ALLOWED = [
     "https://sistema-fichajes.pages.dev",
     "https://campel-fichajes.pages.dev",
 ]
-
-# Regex para previews de Cloudflare Pages (subdominios tipo main--xxxx.pages.dev)
 DEFAULT_PREVIEWS_REGEX = r"^https://[a-z0-9-]+--(sistema-fichajes|campel-fichajes)\.pages\.dev$"
 PAGES_PREVIEWS_REGEX = os.getenv("ALLOW_ORIGIN_REGEX", DEFAULT_PREVIEWS_REGEX)
 
@@ -96,9 +92,7 @@ class RegistroIn(BaseModel):
     password: str
     role: str = "employee"
 
-# ==================== HANDLERS (lógica real) ====================
-
-# ---- Auth (form-urlencoded estándar OAuth2PasswordRequestForm) ----
+# ==================== HANDLERS ====================
 def login_handler(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = crud.autenticar_usuario(db, form_data.username, form_data.password)
     if not user:
@@ -106,7 +100,6 @@ def login_handler(form_data: OAuth2PasswordRequestForm = Depends(), db: Session 
     token = auth.crear_token_acceso({"sub": user.email, "role": user.role})
     return {"access_token": token, "token_type": "bearer"}
 
-# ---- Usuarios / administración ----
 def registrar_handler(
     datos: RegistroIn,
     db: Session = Depends(get_db),
@@ -165,7 +158,6 @@ def fichar_handler(
     usuario: User = Depends(get_current_user)
 ):
     try:
-        # Estado previo: ¿había una ENTRADA abierta?
         ultimo_antes = (
             db.query(models.Fichaje)
             .filter(models.Fichaje.user_id == usuario.id)
@@ -175,13 +167,11 @@ def fichar_handler(
         era_entrada_abierta = bool(ultimo_antes and (ultimo_antes.tipo or "").lower() == "entrada")
         ultima_entrada_ts = ultimo_antes.timestamp if era_entrada_abierta else None
 
-        # Crear fichaje (el CRUD ya hace autocierre si aplica)
         fich = crud.crear_fichaje(db, tipo, usuario)
 
-        # Meta: ¿se aplicó autocierre por solicitud de SALIDA?
         auto_aplicado, solicitud_id, cerrado_en = False, None, None
         if (tipo or "").lower() == "entrada" and era_entrada_abierta and ultima_entrada_ts:
-            pat = re.compile(r"\[auto-cierre por solicitud #(\d+)\]")
+            pat = re.compile(r"\[asistido por solicitud #(\d+)\]")
             salidas = (
                 db.query(models.Fichaje)
                 .filter(
@@ -208,6 +198,7 @@ def fichar_handler(
                 "tipo": fich.tipo,
                 "timestamp": _safe_iso(fich.timestamp),
                 "is_manual": bool(getattr(fich, "is_manual", False)),
+                "validez": (getattr(fich, "validez", "valido") or "valido"),
             },
             "auto_cierre": {
                 "aplicado": auto_aplicado,
@@ -277,13 +268,14 @@ def exportar_handler(usuario: str, db: Session = Depends(get_db)):
     fichajes = crud.obtener_fichajes_usuario(db, user)
     return utils.exportar_pdf(user.email, fichajes)
 
-# ==================== MONTAJE CANÓNICO (/api) ====================
+# ==================== MONTAJE /api ====================
 app.include_router(auth_routes.router,     prefix="/api", tags=["auth"])
 app.include_router(calendar.router,        prefix="/api", tags=["calendar"])
 app.include_router(ausencias_router.router, prefix="/api")
 app.include_router(logs_router.router,     prefix="/api/logs")
 
 # Endpoints canónicos
+from app.schemas import UserOut, UsuarioUpdate, UsuarioPassword
 app.add_api_route("/api/registrar",             registrar_handler,             methods=["POST"])
 app.add_api_route("/api/usuarios",              listar_usuarios_handler,       methods=["GET"], response_model=List[UserOut])
 app.add_api_route("/api/usuarios/{usuario_id}", actualizar_usuario_handler,    methods=["PUT"])
@@ -298,9 +290,9 @@ app.add_api_route("/api/solicitudes",           listar_solicitudes_handler,    m
 app.add_api_route("/api/resolver-solicitud",    resolver_solicitud_handler,    methods=["POST"])
 app.add_api_route("/api/exportar-pdf",          exportar_handler,              methods=["GET"])
 
+# Aliases legacy
 app.include_router(auth_routes.legacy, prefix="/api")
 
-# Usuarios
 @app.api_route("/registrar", methods=["POST"], include_in_schema=False)
 def legacy_registrar_redirect():
     return RedirectResponse(url="/api/registrar", status_code=307)
@@ -321,7 +313,6 @@ def legacy_eliminar_usuario_redirect(usuario_id: int):
 def legacy_restablecer_password_redirect(usuario_id: int):
     return RedirectResponse(url=f"/api/usuarios/{usuario_id}/restablecer", status_code=307)
 
-# Fichajes
 @app.api_route("/fichar", methods=["POST"], include_in_schema=False)
 def legacy_fichar_redirect():
     return RedirectResponse(url="/api/fichar", status_code=307)
@@ -338,7 +329,6 @@ def legacy_resumen_fichajes_redirect():
 def legacy_resumen_semana_redirect():
     return RedirectResponse(url="/api/resumen-semana", status_code=307)
 
-# Solicitudes
 @app.api_route("/solicitar-fichaje-manual", methods=["POST"], include_in_schema=False)
 def legacy_solicitar_manual_redirect():
     return RedirectResponse(url="/api/solicitar-fichaje-manual", status_code=307)
@@ -351,12 +341,10 @@ def legacy_listar_solicitudes_redirect():
 def legacy_resolver_solicitud_redirect():
     return RedirectResponse(url="/api/resolver-solicitud", status_code=307)
 
-# Export
 @app.api_route("/exportar-pdf", methods=["GET"], include_in_schema=False)
 def legacy_exportar_redirect():
     return RedirectResponse(url="/api/exportar-pdf", status_code=307)
 
-# Routers legacy (wildcards) -> /api
 @app.api_route("/logs/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], include_in_schema=False)
 def legacy_logs_wildcard_redirect(path: str):
     return RedirectResponse(url=f"/api/logs/{path}", status_code=307)
@@ -366,9 +354,10 @@ def legacy_ausencias_wildcard_redirect(path: str):
     return RedirectResponse(url=f"/api/ausencias/{path}", status_code=307)
 
 # ---------------- Static ----------------
+from fastapi.staticfiles import StaticFiles
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# ---------------- Entrypoint (local dev) ----------------
+# ---------------- Entrypoint ----------------
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
