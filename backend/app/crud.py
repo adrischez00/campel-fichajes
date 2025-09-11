@@ -34,15 +34,39 @@ def _safe_iso(dt: Optional[datetime]) -> Optional[str]:
     return dt.isoformat() if dt else None
 
 # ======================== Usuarios ========================
+def _normalize_email_for_compare(e: str) -> str:
+    # quita TODO tipo de espacios (incl. NBSP) y pasa a lower
+    return re.sub(r"\s+", "", (e or "")).replace("\u00A0", "").lower()
+
 def obtener_usuario_por_email(db: Session, email: str):
+    """
+    Búsqueda robusta:
+    - elimina TODOS los espacios (normales, NBSP, tabs, etc.)
+    - case-insensitive
+    - funciona aunque la columna tenga espacios raros guardados
+    """
     if not email:
         return None
-    e = (email or "").strip()
-    return (
-        db.query(models.User)
-        .filter(func.lower(func.trim(models.User.email)) == e.lower())
-        .first()
-    )
+    e_norm = _normalize_email_for_compare(email)
+
+    # Preferimos hacerlo en SQL (Postgres): regexp_replace
+    try:
+        return (
+            db.query(models.User)
+            .filter(
+                func.lower(
+                    func.regexp_replace(models.User.email, r'\s+', '', 'g')
+                ) == e_norm
+            )
+            .first()
+        )
+    except Exception:
+        # Fallback si el dialecto no soporta regexp_replace
+        for u in db.query(models.User).all():
+            if _normalize_email_for_compare(u.email) == e_norm:
+                return u
+        return None
+
 
 def obtener_usuario_por_id(db: Session, user_id: int) -> Optional[models.User]:
     return db.query(models.User).filter(models.User.id == user_id).first()
@@ -67,7 +91,6 @@ def autenticar_usuario(db: Session, email: str, password: str):
 
 def obtener_usuarios(db: Session):
     return db.query(models.User).all()
-
 # ========================
 #  Fichajes
 # ========================

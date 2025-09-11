@@ -1,7 +1,7 @@
 from datetime import timedelta
 import os
 
-from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Response, Request, Query
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -12,18 +12,20 @@ from app.auth import (
     verificar_password,
     crear_token_acceso,
     decodificar_token,
-    pwd_context,   # para debug opcional
+    pwd_context,  # solo para debug info
 )
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 legacy = APIRouter(tags=["auth"])
+
+DEBUG_AUTH = os.getenv("DEBUG_AUTH", "0") not in ("0", "false", "False")
 
 # ============= Config cookie de refresh =============
 COOKIE_NAME = "refresh_token"
 COOKIE_PATH = "/"
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"  # en local: false
 COOKIE_HTTPONLY = True
-COOKIE_SAMESITE = "none"  # front/back en dominios distintos (HTTPS)
+COOKIE_SAMESITE = "none"  # front/back distintos (HTTPS)
 REFRESH_DAYS = int(os.getenv("REFRESH_DAYS", "30"))
 
 def _set_refresh_cookie(resp: Response, token: str):
@@ -61,55 +63,56 @@ def _token_response(user, response: Response):
 
 def _safe_verify(plain: str, hashed: str) -> bool:
     try:
-        return verificar_password(plain, hashed)
+        return verificar_password(plain, (hashed or ""))
     except Exception:
         return False
 
 def _login(db: Session, username_or_email: str, password: str, response: Response):
     user = obtener_usuario_por_email(db, username_or_email)
     if not user:
+        if DEBUG_AUTH:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail={"msg": "Credenciales inválidas", "user_found": False}
+            )
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
+
     hashed = (
         getattr(user, "hashed_password", None)
         or getattr(user, "password_hash", None)
         or getattr(user, "password", None)
     )
-    if not hashed or not _safe_verify(password, hashed):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
+
+    ok = bool(hashed) and _safe_verify(password, hashed)
+    if not ok:
+        if DEBUG_AUTH:
+            # devolvemos LONGITUD y prefijo del hash para diagnosticar, no el hash completo
+            detail = {
+                "msg": "Credenciales inválidas",
+                "user_found": True,
+                "hash_len": len(hashed) if hashed else None,
+                "hash_prefix": (hashed[:7] if hashed else None),
+                "schemes": list(pwd_context.schemes()),
+            }
+            raise HTTPException(status_code=401, detail=detail)
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+
     return _token_response(user, response)
 
 # ================= Endpoints =================
-@router.post("/login", summary="Login (form-urlencoded: username, password)")
+@router.post("/login")
 def login_form(response: Response, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    try:
-        return _login(db, form.username, form.password, response)
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("[LOGIN_ERR]", repr(e))
-        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    return _login(db, form.username, form.password, response)
 
-@router.post("/token", summary="Alias de /auth/login")
+@router.post("/token")
 def token_form(response: Response, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    try:
-        return _login(db, form.username, form.password, response)
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("[LOGIN_ERR]", repr(e))
-        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    return _login(db, form.username, form.password, response)
 
-@router.post("/login-json", summary="Login JSON {email,password}")
+@router.post("/login-json")
 def login_json(response: Response, payload: LoginJSON, db: Session = Depends(get_db)):
-    try:
-        return _login(db, payload.email, payload.password, response)
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("[LOGIN_ERR]", repr(e))
-        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    return _login(db, payload.email, payload.password, response)
 
-@router.post("/refresh", summary="Emite nuevo access usando cookie httpOnly refresh_token (rota refresh)")
+@router.post("/refresh")
 def refresh(request: Request, response: Response):
     token = request.cookies.get(COOKIE_NAME)
     if not token:
@@ -123,7 +126,7 @@ def refresh(request: Request, response: Response):
     _set_refresh_cookie(response, new_refresh)
     return {"access_token": new_access, "token_type": "bearer"}
 
-@router.post("/logout", summary="Borra cookie refresh_token")
+@router.post("/logout")
 def logout(response: Response):
     response.delete_cookie(
         key=COOKIE_NAME,
@@ -143,14 +146,18 @@ def legacy_login_token(response: Response, form: OAuth2PasswordRequestForm = Dep
     return _login(db, form.username, form.password, response)
 
 # ===== Debug opcional (quítalos cuando termines) =====
-@router.get("/debug-crypto")
-def debug_crypto():
-    try:
-        import bcrypt as _bc
-        bver = getattr(_bc, "__version__", "present")
-    except Exception as e:
-        bver = f"ERROR: {e!r}"
-    return {"schemes": list(pwd_context.schemes()), "bcrypt": bver}
+@router.get("/debug-user")
+def debug_user(email: str = Query(..., min_length=3), db: Session = Depends(get_db)):
+    u = obtener_usuario_por_email(db, email)
+    if not u:
+        return {"found": False}
+    h = getattr(u, "hashed_password", None) or getattr(u, "password_hash", None) or getattr(u, "password", None)
+    return {
+        "found": True,
+        "email": u.email,
+        "hash_len": len(h) if h else None,
+        "hash_prefix": (h[:7] if h else None),
+    }
 
 class _VerifyBody(BaseModel):
     password: str
