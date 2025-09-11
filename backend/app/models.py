@@ -218,4 +218,4 @@ class CalendarFeedStg(Base):
     region_id = Column(Integer, ForeignKey("regions.id", ondelete="SET NULL"), index=True, nullable=True)
     locality_id = Column(Integer, ForeignKey("localities.id", ondelete="SET NULL"), index=True, nullable=True)
     fuente = Column(String, nullable=True)
-    imported_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now()) 
+    imported_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now()) este?
