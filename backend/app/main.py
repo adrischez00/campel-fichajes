@@ -43,8 +43,6 @@ STATIC_ALLOWED = [
     "https://sistema-fichajes.pages.dev",
     "https://campel-fichajes.pages.dev",
 ]
-
-# Regex para previews de Cloudflare Pages (subdominios tipo main--xxxx.pages.dev)
 DEFAULT_PREVIEWS_REGEX = r"^https://[a-z0-9-]+--(sistema-fichajes|campel-fichajes)\.pages\.dev$"
 PAGES_PREVIEWS_REGEX = os.getenv("ALLOW_ORIGIN_REGEX", DEFAULT_PREVIEWS_REGEX)
 
@@ -72,7 +70,7 @@ app.add_middleware(
     max_age=600,
 )
 
-# --- Asegurar cabeceras CORS también en respuestas 401/500 (Cloud Run) ---
+# Asegurar cabeceras CORS también en 401/500 (Cloud Run)
 @app.middleware("http")
 async def ensure_cors_headers(request: Request, call_next):
     response = await call_next(request)
@@ -91,7 +89,6 @@ async def ensure_cors_headers(request: Request, call_next):
 
 # ---------------- Zona horaria + helper ----------------
 TZ_MADRID = pytz.timezone("Europe/Madrid")
-
 def _safe_iso(dt: Optional[datetime]) -> Optional[str]:
     if not dt:
         return None
@@ -113,9 +110,7 @@ class RegistroIn(BaseModel):
     password: str
     role: str = "employee"
 
-# ==================== HANDLERS (lógica real) ====================
-
-# ---- Auth (form-urlencoded estándar OAuth2PasswordRequestForm) ----
+# ==================== HANDLERS ====================
 def login_handler(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = crud.autenticar_usuario(db, form_data.username, form_data.password)
     if not user:
@@ -123,12 +118,7 @@ def login_handler(form_data: OAuth2PasswordRequestForm = Depends(), db: Session 
     token = auth.crear_token_acceso({"sub": user.email, "role": user.role})
     return {"access_token": token, "token_type": "bearer"}
 
-# ---- Usuarios / administración ----
-def registrar_handler(
-    datos: RegistroIn,
-    db: Session = Depends(get_db),
-    solicitante: User = Depends(get_current_user)
-):
+def registrar_handler(datos: RegistroIn, db: Session = Depends(get_db), solicitante: User = Depends(get_current_user)):
     if solicitante.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
     existente = crud.obtener_usuario_por_email(db, datos.email)
@@ -138,51 +128,28 @@ def registrar_handler(
     utils.log_evento(db, solicitante, "crear_usuario", f"Creó a {datos.email} como {datos.role}")
     return nuevo
 
-def listar_usuarios_handler(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def listar_usuarios_handler(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
     return db.query(User).all()
 
-def actualizar_usuario_handler(
-    usuario_id: int,
-    datos: UsuarioUpdate,
-    db: Session = Depends(get_db),
-    usuario: User = Depends(get_current_user)
-):
+def actualizar_usuario_handler(usuario_id: int, datos: UsuarioUpdate, db: Session = Depends(get_db), usuario: User = Depends(get_current_user)):
     if usuario.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
     return crud.editar_usuario(db, usuario_id, datos.email, datos.role)
 
-def eliminar_usuario_handler(
-    usuario_id: int,
-    db: Session = Depends(get_db),
-    usuario: User = Depends(get_current_user)
-):
+def eliminar_usuario_handler(usuario_id: int, db: Session = Depends(get_db), usuario: User = Depends(get_current_user)):
     if usuario.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
     return crud.eliminar_usuario(db, usuario_id)
 
-def restablecer_password_handler(
-    usuario_id: int,
-    datos: UsuarioPassword,
-    db: Session = Depends(get_db),
-    usuario: User = Depends(get_current_user)
-):
+def restablecer_password_handler(usuario_id: int, datos: UsuarioPassword, db: Session = Depends(get_db), usuario: User = Depends(get_current_user)):
     if usuario.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
     return crud.restablecer_password(db, usuario_id, datos.nueva_password)
 
-# ---- Fichajes ----
-def fichar_handler(
-    tipo: str = Form(...),
-    db: Session = Depends(get_db),
-    usuario: User = Depends(get_current_user)
-):
+def fichar_handler(tipo: str = Form(...), db: Session = Depends(get_db), usuario: User = Depends(get_current_user)):
     try:
-        # Estado previo: ¿había una ENTRADA abierta?
         ultimo_antes = (
             db.query(models.Fichaje)
             .filter(models.Fichaje.user_id == usuario.id)
@@ -191,11 +158,8 @@ def fichar_handler(
         )
         era_entrada_abierta = bool(ultimo_antes and (ultimo_antes.tipo or "").lower() == "entrada")
         ultima_entrada_ts = ultimo_antes.timestamp if era_entrada_abierta else None
-
-        # Crear fichaje (el CRUD ya hace autocierre si aplica)
         fich = crud.crear_fichaje(db, tipo, usuario)
 
-        # Meta: ¿se aplicó autocierre por solicitud de SALIDA?
         auto_aplicado, solicitud_id, cerrado_en = False, None, None
         if (tipo or "").lower() == "entrada" and era_entrada_abierta and ultima_entrada_ts:
             pat = re.compile(r"\[auto-cierre por solicitud #(\d+)\]")
@@ -220,17 +184,8 @@ def fichar_handler(
 
         return {
             "ok": True,
-            "fichaje": {
-                "id": fich.id,
-                "tipo": fich.tipo,
-                "timestamp": _safe_iso(fich.timestamp),
-                "is_manual": bool(getattr(fich, "is_manual", False)),
-            },
-            "auto_cierre": {
-                "aplicado": auto_aplicado,
-                "solicitud_id": solicitud_id,
-                "cerrado_en": cerrado_en,
-            },
+            "fichaje": {"id": fich.id, "tipo": fich.tipo, "timestamp": _safe_iso(fich.timestamp), "is_manual": bool(getattr(fich, "is_manual", False))},
+            "auto_cierre": {"aplicado": auto_aplicado, "solicitud_id": solicitud_id, "cerrado_en": cerrado_en},
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -243,19 +198,12 @@ def obtener_fichajes_handler(usuario: str = Header(...), db: Session = Depends(g
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return crud.obtener_fichajes_usuario(db, user)
 
-def resumen_fichajes_handler(
-    db: Session = Depends(get_db),
-    usuario: User = Depends(get_current_user)
-):
+def resumen_fichajes_handler(db: Session = Depends(get_db), usuario: User = Depends(get_current_user)):
     return crud.resumen_fichajes_usuario(db, usuario)
 
-def resumen_semana_handler(
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
+def resumen_semana_handler(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     return crud.resumen_semana_usuario(db, current_user)
 
-# ---- Solicitudes ----
 def solicitar_fichaje_manual_handler(data: SolicitudManualIn, usuario: str = Header(...), db: Session = Depends(get_db)):
     user = crud.obtener_usuario_por_email(db, usuario)
     if not user:
@@ -265,27 +213,19 @@ def solicitar_fichaje_manual_handler(data: SolicitudManualIn, usuario: str = Hea
 def listar_solicitudes_handler(db: Session = Depends(get_db)):
     return crud.listar_solicitudes(db)
 
-def resolver_solicitud_handler(
-    req: Request,
-    body: ResolverSolicitudIn,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user)
-):
+def resolver_solicitud_handler(req: Request, body: ResolverSolicitudIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
     if current_user.role not in ("admin", "manager"):
         raise HTTPException(status_code=403, detail="No autorizado")
-
     ip = req.client.host if req and req.client else None
     try:
         if body.aprobar:
             s = crud.aprobar_solicitud(db, body.id, admin=current_user, ip=ip)
         else:
-            s = crud.rechazar_solicitud(db, body.id, admin=current_user,
-                                        motivo_rechazo=body.motivo_rechazo, ip=ip)
+            s = crud.rechazar_solicitud(db, body.id, admin=current_user, motivo_rechazo=body.motivo_rechazo, ip=ip)
         return {"ok": True, "solicitud": s.id}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-# ---- Export ----
 def exportar_handler(usuario: str, db: Session = Depends(get_db)):
     usuario = usuario.strip()
     user = crud.obtener_usuario_por_email(db, usuario)
@@ -298,7 +238,7 @@ def exportar_handler(usuario: str, db: Session = Depends(get_db)):
 app.include_router(auth_routes.router,     prefix="/api", tags=["auth"])
 app.include_router(calendar.router,        prefix="/api", tags=["calendar"])
 app.include_router(ausencias_router.router, prefix="/api")
-app.include_router(logs_router.router,     prefix="/api/logs"])
+app.include_router(logs_router.router,     prefix="/api/logs")
 
 # Endpoints canónicos
 app.add_api_route("/api/registrar",             registrar_handler,             methods=["POST"])
@@ -317,7 +257,7 @@ app.add_api_route("/api/exportar-pdf",          exportar_handler,              m
 
 app.include_router(auth_routes.legacy, prefix="/api")
 
-# Usuarios
+# Redirects legacy
 @app.api_route("/registrar", methods=["POST"], include_in_schema=False)
 def legacy_registrar_redirect():
     return RedirectResponse(url="/api/registrar", status_code=307)
@@ -338,7 +278,6 @@ def legacy_eliminar_usuario_redirect(usuario_id: int):
 def legacy_restablecer_password_redirect(usuario_id: int):
     return RedirectResponse(url=f"/api/usuarios/{usuario_id}/restablecer", status_code=307)
 
-# Fichajes
 @app.api_route("/fichar", methods=["POST"], include_in_schema=False)
 def legacy_fichar_redirect():
     return RedirectResponse(url="/api/fichar", status_code=307)
@@ -355,7 +294,6 @@ def legacy_resumen_fichajes_redirect():
 def legacy_resumen_semana_redirect():
     return RedirectResponse(url="/api/resumen-semana", status_code=307)
 
-# Solicitudes
 @app.api_route("/solicitar-fichaje-manual", methods=["POST"], include_in_schema=False)
 def legacy_solicitar_manual_redirect():
     return RedirectResponse(url="/api/solicitar-fichaje-manual", status_code=307)
@@ -368,12 +306,10 @@ def legacy_listar_solicitudes_redirect():
 def legacy_resolver_solicitud_redirect():
     return RedirectResponse(url="/api/resolver-solicitud", status_code=307)
 
-# Export
 @app.api_route("/exportar-pdf", methods=["GET"], include_in_schema=False)
 def legacy_exportar_redirect():
     return RedirectResponse(url="/api/exportar-pdf", status_code=307)
 
-# Routers legacy (wildcards) -> /api
 @app.api_route("/logs/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"], include_in_schema=False)
 def legacy_logs_wildcard_redirect(path: str):
     return RedirectResponse(url=f"/api/logs/{path}", status_code=307)
