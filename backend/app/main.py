@@ -67,10 +67,27 @@ app.add_middleware(
     allow_origin_regex=PAGES_PREVIEWS_REGEX,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With", "Origin", "Accept"],
     expose_headers=["Content-Disposition"],
     max_age=600,
 )
+
+# --- Asegurar cabeceras CORS también en respuestas 401/500 (Cloud Run) ---
+@app.middleware("http")
+async def ensure_cors_headers(request: Request, call_next):
+    response = await call_next(request)
+    origin = request.headers.get("origin")
+    allowed = False
+    if origin:
+        try:
+            allowed = origin in ALLOWED_ORIGINS or (re.match(PAGES_PREVIEWS_REGEX, origin or "") is not None)
+        except Exception:
+            allowed = False
+    if allowed:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+    return response
 
 # ---------------- Zona horaria + helper ----------------
 TZ_MADRID = pytz.timezone("Europe/Madrid")
@@ -281,7 +298,7 @@ def exportar_handler(usuario: str, db: Session = Depends(get_db)):
 app.include_router(auth_routes.router,     prefix="/api", tags=["auth"])
 app.include_router(calendar.router,        prefix="/api", tags=["calendar"])
 app.include_router(ausencias_router.router, prefix="/api")
-app.include_router(logs_router.router,     prefix="/api/logs")
+app.include_router(logs_router.router,     prefix="/api/logs"])
 
 # Endpoints canónicos
 app.add_api_route("/api/registrar",             registrar_handler,             methods=["POST"])
