@@ -107,13 +107,15 @@ def _instante_en_parcial(a: Ausencia, t: datetime, tz=TZ_MADRID) -> bool:
     return ini <= t <= fin
 
 
-# === NUEVO: autocerrar turno abierto con solicitud de SALIDA (pendiente/aprobada)
+# === AUTOCIERRE ASISTIDO: usa solicitud de SALIDA (pendiente/aprobada)
 def _autocerrar_turno_con_solicitud_salida(db: Session, usuario: models.User, ultima_entrada_dt: datetime):
     """
     Si existe una solicitud manual (pendiente o aprobada) de SALIDA con timestamp
-    >= ultima_entrada_dt, crea un fichaje de salida is_manual en ese instante y lo devuelve.
-    Además, marca la solicitud como 'aprobada' si estaba 'pendiente'.
+    >= ultima_entrada_dt y <= ahora, crea (si no existe) un fichaje de salida
+    enlazado a esa solicitud. Si la solicitud ya estaba APROBADA → validez='valido'.
+    Si estaba PENDIENTE → validez='provisional'. NO cambia el estado de la solicitud.
     """
+    ahora = datetime.now(TZ_MADRID)
     sol = (
         db.query(models.SolicitudManual)
         .filter(
@@ -121,7 +123,7 @@ def _autocerrar_turno_con_solicitud_salida(db: Session, usuario: models.User, ul
             models.SolicitudManual.tipo.ilike("salida"),
             models.SolicitudManual.estado.in_(["pendiente", "aprobada"]),
             models.SolicitudManual.timestamp >= ultima_entrada_dt,
-            models.SolicitudManual.timestamp <= datetime.now(TZ_MADRID),
+            models.SolicitudManual.timestamp <= ahora,
         )
         .order_by(models.SolicitudManual.timestamp.asc())
         .first()
@@ -131,41 +133,37 @@ def _autocerrar_turno_con_solicitud_salida(db: Session, usuario: models.User, ul
 
     ts = _ensure_aware(sol.timestamp, TZ_MADRID)
 
-    # Evitar duplicados exactos
+    # ¿Ya hay fichaje de salida exacto o ya enlazado a esta solicitud?
     ya = (
         db.query(models.Fichaje)
         .filter(
             models.Fichaje.user_id == usuario.id,
             models.Fichaje.tipo == "salida",
-            models.Fichaje.timestamp == ts,
+            or_(
+                models.Fichaje.timestamp == ts,
+                models.Fichaje.solicitud_id == sol.id
+            ),
         )
         .first()
     )
     if ya:
-        # Asegura que la solicitud queda aprobada si la salida ya existía
-        if (sol.estado or "").lower() == "pendiente":
-            sol.estado = "aprobada"
-            db.add(sol)
-            db.commit()
         return ya
 
     hash_val = generar_hash_fichaje(usuario.email, "salida", ts.isoformat())
+    validez = "valido" if (sol.estado or "").lower() == "aprobada" else "provisional"
+
     fich = models.Fichaje(
         tipo="salida",
         timestamp=ts,
         hash=hash_val,
         usuario=usuario,
         is_manual=True,
-        motivo=f"[auto-cierre por solicitud #{sol.id}] {sol.motivo or ''}".strip(),
+        motivo=f"[asistido por solicitud #{sol.id}] {sol.motivo or ''}".strip(),
+        validez=validez,
+        solicitud_id=sol.id,
     )
     db.add(fich)
-
-    # Marcar aprobada si estaba pendiente
-    if (sol.estado or "").lower() == "pendiente":
-        sol.estado = "aprobada"
-        db.add(sol)
-
-    log_evento(db, usuario, "fichaje", "salida (auto-cierre por solicitud)")
+    log_evento(db, usuario, "fichaje", f"salida (asistido: {validez})")
     db.commit()
     db.refresh(fich)
     return fich
@@ -181,13 +179,13 @@ def crear_fichaje(db: Session, tipo: str, usuario: models.User):
     # --- Bloqueo por ausencias/vacaciones aprobadas ---
     aus = _ausencias_aprobadas_en_instante(db, usuario.email, ahora)
     for a in aus:
-        # Bloquear fichajes en vacaciones retribuidas de día completo
+        # Vacaciones retribuidas día completo
         if (a.tipo or "").upper() == "VACACIONES" and not a.parcial and a.retribuida:
             raise ValueError("❌ No puedes fichar: tienes VACACIONES retribuidas aprobadas hoy.")
-        # Otros tipos retribuidos de día completo
+        # Otros tipos retribuidos día completo
         if a.retribuida and not a.parcial and (a.tipo or "").upper() != "VACACIONES":
             raise ValueError(f"❌ No puedes fichar: existe una ausencia retribuida aprobada hoy ({a.tipo}).")
-        # Parcial: bloquear si el instante cae dentro del tramo parcial
+        # Parcial: bloquear si cae dentro del tramo parcial
         if a.parcial and _instante_en_parcial(a, ahora):
             rango = []
             if a.hora_inicio:
@@ -205,7 +203,7 @@ def crear_fichaje(db: Session, tipo: str, usuario: models.User):
         .first()
     )
 
-    # No permitir dos del mismo tipo… salvo la EXCEPCIÓN para ENTRADA con solicitud de SALIDA
+    # No permitir dos del mismo tipo… salvo EXCEPCIÓN ENTRADA con solicitud de SALIDA (asistido)
     if ultimo and (ultimo.tipo or "").lower() == tipo_norm:
         if tipo_norm == "entrada" and (ultimo.tipo or "").lower() == "entrada":
             # Intentar autocierre con solicitud de salida
@@ -225,7 +223,7 @@ def crear_fichaje(db: Session, tipo: str, usuario: models.User):
         else:
             raise ValueError(f"❌ Ya existe un fichaje de tipo '{tipo_norm}' justo antes. No se permiten fichajes consecutivos del mismo tipo.")
 
-    # Si tipo == salida, debe haber alguna ENTRADA previa en el histórico
+    # Si tipo == salida, debe haber alguna entrada previa en el histórico
     if tipo_norm == "salida":
         tiene_entrada_previa = (
             db.query(models.Fichaje)
@@ -237,7 +235,13 @@ def crear_fichaje(db: Session, tipo: str, usuario: models.User):
             raise ValueError("❌ No puedes fichar salida sin una entrada previa.")
 
     hash_val = generar_hash_fichaje(usuario.email, tipo_norm, ahora.isoformat())
-    fichaje = models.Fichaje(tipo=tipo_norm, timestamp=ahora, hash=hash_val, usuario=usuario)
+    fichaje = models.Fichaje(
+        tipo=tipo_norm,
+        timestamp=ahora,
+        hash=hash_val,
+        usuario=usuario,
+        # validez por defecto = 'valido'
+    )
     db.add(fichaje)
     log_evento(db, usuario, "fichaje", tipo_norm)
     db.commit()
@@ -259,6 +263,9 @@ def obtener_fichajes_usuario(db: Session, usuario: models.User):
             "timestamp": _safe_iso(f.timestamp),
             "hash": f.hash,
             "usuario_email": usuario.email,
+            "is_manual": bool(getattr(f, "is_manual", False)),
+            "validez": (getattr(f, "validez", "valido") or "valido"),
+            "solicitud_id": getattr(f, "solicitud_id", None),
         }
         for f in fichajes
     ]
@@ -356,7 +363,7 @@ def listar_solicitudes_avanzado(
 
     items = []
     for s in q.all():
-        gp = getattr(s, "gestionado_por", None)  # puede no existir en el modelo actual
+        gp = getattr(s, "gestionado_por", None)
         items.append({
             "id": s.id,
             "fecha": s.fecha,
@@ -383,8 +390,10 @@ def listar_solicitudes(db: Session):
 # --- Acciones con auditoría y logs ---
 def aprobar_solicitud(db: Session, solicitud_id: int, admin: models.User, ip: Optional[str] = None):
     """
-    Aprueba una solicitud creando el fichaje manual correspondiente,
-    rellenando auditoría y registrando log. No duplica si ya existe (p. ej. por autocierre).
+    Aprueba una solicitud creando/actualizando el fichaje correspondiente:
+      - Si ya existe fichaje (p. ej. provisional asistido), lo pasa a validez='valido'.
+      - Si no existe, lo crea con validez='valido'.
+    Mantiene auditoría y log.
     """
     s = db.query(models.SolicitudManual).filter(models.SolicitudManual.id == solicitud_id).first()
     if not s:
@@ -392,29 +401,29 @@ def aprobar_solicitud(db: Session, solicitud_id: int, admin: models.User, ip: Op
     if s.estado != "pendiente":
         raise ValueError("La solicitud ya fue gestionada")
 
-    # Convertir siempre a datetime con zona horaria
     ts = _parse_fecha_hora(s.fecha, s.hora, TZ_MADRID)
 
-    # Evitar duplicar si ya existe ese fichaje (pudo crearse por autocierre)
-    ya = (
+    # Buscar un fichaje ya existente enlazado o por timestamp
+    fich = (
         db.query(models.Fichaje)
         .filter(
-            models.Fichaje.user_id == s.usuario.id,
+            models.Fichaje.user_id == s.user_id,
             models.Fichaje.tipo == s.tipo.lower(),
-            models.Fichaje.timestamp == ts,
+            or_(models.Fichaje.solicitud_id == s.id, models.Fichaje.timestamp == ts),
         )
+        .order_by(models.Fichaje.id.asc())
         .first()
     )
 
-    if not ya:
-        # Coherencia mínima con histórico (solo exigente para SALIDA)
-        if (s.tipo or "").lower() == "salida":
+    if fich:
+        # Coherencia mínima para SALIDA
+        if s.tipo.lower() == "salida":
             entrada_ok = (
                 db.query(models.Fichaje)
                 .filter(
-                    models.Fichaje.user_id == s.usuario.id,
+                    models.Fichaje.user_id == s.user_id,
                     models.Fichaje.tipo == "entrada",
-                    models.Fichaje.timestamp <= ts,
+                    models.Fichaje.timestamp <= fich.timestamp,
                 )
                 .order_by(models.Fichaje.timestamp.desc())
                 .first()
@@ -422,19 +431,38 @@ def aprobar_solicitud(db: Session, solicitud_id: int, admin: models.User, ip: Op
             if not entrada_ok:
                 raise ValueError("❌ No hay una entrada previa válida para esa salida.")
 
-        # Crear fichaje manual
+        fich.validez = "valido"
+        fich.solicitud_id = s.id
+        db.add(fich)
+    else:
+        # Crear fichaje manual válido
         hash_val = generar_hash_fichaje(s.usuario.email, (s.tipo or "").lower(), ts.isoformat())
-        fichaje = models.Fichaje(
+        fich = models.Fichaje(
             tipo=(s.tipo or "").lower(),
             timestamp=ts,
             hash=hash_val,
             usuario=s.usuario,
             is_manual=True,
             motivo=s.motivo,
+            validez="valido",
+            solicitud_id=s.id,
         )
-        db.add(fichaje)
+        if fich.tipo == "salida":
+            entrada_ok = (
+                db.query(models.Fichaje)
+                .filter(
+                    models.Fichaje.user_id == s.user_id,
+                    models.Fichaje.tipo == "entrada",
+                    models.Fichaje.timestamp <= fich.timestamp,
+                )
+                .order_by(models.Fichaje.timestamp.desc())
+                .first()
+            )
+            if not entrada_ok:
+                raise ValueError("❌ No hay una entrada previa válida para esa salida.")
+        db.add(fich)
 
-    # Auditoría en solicitud (solo si el modelo tiene esos campos)
+    # Marcar solicitud como aprobada + auditoría
     s.estado = "aprobada"
     if admin and hasattr(s, "gestionado_por_id"):
         s.gestionado_por_id = admin.id
@@ -451,6 +479,9 @@ def aprobar_solicitud(db: Session, solicitud_id: int, admin: models.User, ip: Op
 
 
 def rechazar_solicitud(db: Session, solicitud_id: int, admin: models.User, motivo_rechazo: str, ip: Optional[str] = None):
+    """
+    Rechaza una solicitud. Si existe un fichaje enlazado (provisional), pasa a validez='invalidado'.
+    """
     motivo = (motivo_rechazo or "").strip()
 
     s = db.query(models.SolicitudManual).filter(models.SolicitudManual.id == solicitud_id).first()
@@ -458,6 +489,18 @@ def rechazar_solicitud(db: Session, solicitud_id: int, admin: models.User, motiv
         raise ValueError("Solicitud no encontrada")
     if s.estado != "pendiente":
         raise ValueError("La solicitud ya fue gestionada")
+
+    fich = (
+        db.query(models.Fichaje)
+        .filter(
+            models.Fichaje.user_id == s.user_id,
+            models.Fichaje.solicitud_id == s.id
+        )
+        .first()
+    )
+    if fich:
+        fich.validez = "invalidado"
+        db.add(fich)
 
     s.estado = "rechazada"
     if hasattr(s, "motivo_rechazo"):
@@ -496,6 +539,7 @@ def obtener_logs(db: Session):
             "tipo": f.tipo,
             "timestamp": _safe_iso(f.timestamp),
             "is_manual": bool(getattr(f, "is_manual", False)),
+            "validez": (getattr(f, "validez", "valido") or "valido"),
             "motivo": (getattr(f, "motivo", "") or "").strip() if getattr(f, "is_manual", False) else ""
         })
     return resultado
@@ -563,7 +607,6 @@ def _interseccion_seg(a_ini, a_fin, b_ini, b_fin, tz=TZ_MADRID) -> int:
 def _tramo_ausencia_en_dia(a: Ausencia, dia_dt: date, tz=TZ_MADRID):
     """Devuelve (ini_dt, fin_dt) de la ausencia acotada al día 'dia_dt', tz-aware."""
     if a.parcial:
-        # Primer día: desde hora_inicio; último día: hasta hora_fin; intermedios: día completo
         if dia_dt == a.fecha_inicio and a.hora_inicio is not None:
             ini = _ensure_aware(datetime.combine(dia_dt, a.hora_inicio), tz)
         else:
@@ -605,7 +648,8 @@ def resumen_fichajes_usuario(db: Session, usuario: models.User):
                 fichajes_futuros.append({
                     "tipo": f.tipo,
                     "timestamp": _safe_iso(f.timestamp),
-                    "is_manual": getattr(f, "is_manual", False)
+                    "is_manual": getattr(f, "is_manual", False),
+                    "validez": (getattr(f, "validez", "valido") or "valido"),
                 })
             dia = ts_local.date().isoformat()
             por_dia[dia].append(f)
@@ -629,10 +673,13 @@ def resumen_fichajes_usuario(db: Session, usuario: models.User):
         for f in sorted(lista, key=lambda x: x.timestamp):
             try:
                 ts = _ensure_aware(f.timestamp, TZ_MADRID)
+                val = (getattr(f, "validez", "valido") or "valido").lower()
                 if (f.tipo or "").lower() == "entrada":
                     if pendiente:
                         bloques.append({
-                            "entrada": {"timestamp": _safe_iso(pendiente.timestamp), "is_manual": getattr(pendiente, "is_manual", False)},
+                            "entrada": {"timestamp": _safe_iso(pendiente.timestamp),
+                                        "is_manual": getattr(pendiente, "is_manual", False),
+                                        "validez": (getattr(pendiente, "validez", "valido") or "valido")},
                             "salida": None,
                             "duracion": None,
                             "anomalia": "Entrada sin salida",
@@ -642,20 +689,43 @@ def resumen_fichajes_usuario(db: Session, usuario: models.User):
                     if pendiente:
                         t1 = _ensure_aware(pendiente.timestamp, TZ_MADRID)
                         t2 = ts
-                        dur = (t2 - t1).total_seconds()
-                        bloques.append({
-                            "entrada": {"timestamp": _safe_iso(pendiente.timestamp), "is_manual": getattr(pendiente, "is_manual", False)},
-                            "salida": {"timestamp": _safe_iso(f.timestamp), "is_manual": getattr(f, "is_manual", False)},
-                            "duracion": int(dur),
-                            "anomalia": None if dur >= 0 else "Duración negativa",
-                        })
-                        if dur > 0:
-                            total_segundos += dur
+                        val_in = (getattr(pendiente, "validez", "valido") or "valido").lower()
+                        val_out = val
+
+                        # Si cualquiera no es 'valido' → no computa y marcamos anomalía
+                        if val_in != "valido" or val_out != "valido":
+                            motivo = "Pendiente de aprobación" if ("provisional" in (val_in, val_out)) else "Invalidado por admin"
+                            bloques.append({
+                                "entrada": {"timestamp": _safe_iso(pendiente.timestamp),
+                                            "is_manual": getattr(pendiente, "is_manual", False),
+                                            "validez": val_in},
+                                "salida": {"timestamp": _safe_iso(f.timestamp),
+                                           "is_manual": getattr(f, "is_manual", False),
+                                           "validez": val_out},
+                                "duracion": None,
+                                "anomalia": motivo,
+                            })
+                        else:
+                            dur = (t2 - t1).total_seconds()
+                            bloques.append({
+                                "entrada": {"timestamp": _safe_iso(pendiente.timestamp),
+                                            "is_manual": getattr(pendiente, "is_manual", False),
+                                            "validez": val_in},
+                                "salida": {"timestamp": _safe_iso(f.timestamp),
+                                           "is_manual": getattr(f, "is_manual", False),
+                                           "validez": val_out},
+                                "duracion": int(dur),
+                                "anomalia": None if dur >= 0 else "Duración negativa",
+                            })
+                            if dur > 0:
+                                total_segundos += dur
                         pendiente = None
                     else:
                         bloques.append({
                             "entrada": None,
-                            "salida": {"timestamp": _safe_iso(f.timestamp), "is_manual": getattr(f, "is_manual", False)},
+                            "salida": {"timestamp": _safe_iso(f.timestamp),
+                                       "is_manual": getattr(f, "is_manual", False),
+                                       "validez": val},
                             "duracion": None,
                             "anomalia": "Salida sin entrada",
                         })
@@ -663,15 +733,19 @@ def resumen_fichajes_usuario(db: Session, usuario: models.User):
                 continue  # bloque corrupto, ignorar
 
         if pendiente:
+            val_in = (getattr(pendiente, "validez", "valido") or "valido").lower()
             bloques.append({
-                "entrada": {"timestamp": _safe_iso(pendiente.timestamp), "is_manual": getattr(pendiente, "is_manual", False)},
+                "entrada": {"timestamp": _safe_iso(pendiente.timestamp),
+                            "is_manual": getattr(pendiente, "is_manual", False),
+                            "validez": val_in},
                 "salida": None,
                 "duracion": None,
                 "anomalia": "Aún sin salida",
             })
             turno_abierto = {
                 "desde": _safe_iso(pendiente.timestamp),
-                "is_manual": getattr(pendiente, "is_manual", False)
+                "is_manual": getattr(pendiente, "is_manual", False),
+                "validez": val_in
             }
 
         # ---- AUSENCIAS retribuidas del día (NO añadimos bloques de ausencia a la UI) ----
@@ -719,7 +793,7 @@ def resumen_fichajes_usuario(db: Session, usuario: models.User):
             aus_retrib_seg += falta_para_jornada
 
         resumen[dia] = {
-            "total": int(total_segundos),                       # solo fichajes reales
+            "total": int(total_segundos),                       # solo fichajes válidos sumados
             "bloques": bloques,
             "ausencias_retribuidas": int(aus_retrib_seg),       # segundos por ausencias retribuidas (unión)
             "total_computado": int(total_segundos) + int(aus_retrib_seg)  # real + retribuidas
