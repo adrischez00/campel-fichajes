@@ -1,7 +1,8 @@
 // src/services/api.js
 
 // === BASE URL (HTTPS-safe y con sufijo /api garantizado) ===
-const RAW = (import.meta.env?.VITE_API_URL || "http://localhost:8000").replace(/\/+$/, "");
+const RAW = (import.meta.env?.VITE_API_URL || "http://localhost:8000")
+  .replace(/\/+$/, "");
 const RAW_SECURE =
   typeof window !== "undefined" && window.location.protocol === "https:"
     ? RAW.replace(/^http:\/\//, "https://")
@@ -18,16 +19,10 @@ const storage = {
   get() {
     let v = null;
     if (typeof sessionStorage !== "undefined") {
-      for (const k of ACCESS_KEYS) {
-        v ||= sessionStorage.getItem(k);
-        if (v) break;
-      }
+      for (const k of ACCESS_KEYS) { v ||= sessionStorage.getItem(k); if (v) break; }
     }
     if (!v && typeof localStorage !== "undefined") {
-      for (const k of ACCESS_KEYS) {
-        v ||= localStorage.getItem(k);
-        if (v) break;
-      }
+      for (const k of ACCESS_KEYS) { v ||= localStorage.getItem(k); if (v) break; }
     }
     return v;
   },
@@ -61,9 +56,7 @@ function assertNoMixedContent() {
     window.location.protocol === "https:" &&
     API_URL.startsWith("http://")
   ) {
-    throw new Error(
-      `Mixed content: app en HTTPS pero API_URL=${API_URL}. Usa HTTPS en VITE_API_URL.`
-    );
+    throw new Error(`Mixed content: app en HTTPS pero API_URL=${API_URL}. Usa HTTPS en VITE_API_URL.`);
   }
 }
 // API_URL ya termina en /api. Evita duplicar si alguien pasa "/api/...."
@@ -83,8 +76,7 @@ function buildHeaders(extraHeaders = {}, token, method, body) {
   const headers = { ...extraHeaders };
   const t = token ?? storage.get();
   if (t) headers.Authorization = `Bearer ${t}`;
-  const isFormData =
-    typeof FormData !== "undefined" && body instanceof FormData;
+  const isFormData = (typeof FormData !== "undefined") && body instanceof FormData;
   if (willSendBody(method, body) && !headers["Content-Type"] && !isFormData) {
     headers["Content-Type"] = "application/json";
   }
@@ -94,14 +86,9 @@ function buildHeaders(extraHeaders = {}, token, method, body) {
 async function safeErrorText(res) {
   try {
     const j = await res.json();
-    // FastAPI suele devolver { detail: "..." }
-    return j?.detail || j?.message || JSON.stringify(j);
+    return j?.detail || JSON.stringify(j);
   } catch {
-    try {
-      return await res.text();
-    } catch {
-      return null;
-    }
+    try { return await res.text(); } catch { return null; }
   }
 }
 async function parseBody(res) {
@@ -116,11 +103,7 @@ let waiters = [];
 
 async function refreshAccess() {
   const url = join("/auth/refresh");
-  const opts = {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-  };
+  const opts = { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" } };
   const res = await fetch(url, opts);
   if (!res.ok) {
     storage.clear();
@@ -134,40 +117,21 @@ async function refreshAccess() {
 }
 
 // ====== core request ======
-async function request(
-  method,
-  endpoint,
-  { body, token = null, headers = {}, signal, retry = false } = {}
-) {
+async function request(method, endpoint, { body, token = null, headers = {}, signal, retry = false } = {}) {
   assertNoMixedContent();
 
   const url = join(endpoint);
   const opts = { method, signal };
-  const isFormData =
-    typeof FormData !== "undefined" && body instanceof FormData;
+  const isFormData = (typeof FormData !== "undefined") && body instanceof FormData;
   opts.headers = buildHeaders(headers, token, method, body);
   if (willSendBody(method, body)) {
-    opts.body = isFormData
-      ? body
-      : typeof body === "string"
-      ? body
-      : JSON.stringify(body);
+    opts.body = isFormData ? body : (typeof body === "string" ? body : JSON.stringify(body));
   }
   if (USE_CREDENTIALS) opts.credentials = "include";
 
   const res = await fetch(url, opts);
 
-  // --- manejo 401: NO hacer refresh si es auth o si no hay token aún
-  const hasToken = !!(token ?? storage.get());
-  const isAuthEndpoint = /^\/auth\//.test(normalizePath(endpoint));
-
   if (res.status === 401 && !retry) {
-    if (!hasToken || isAuthEndpoint) {
-      const errText = await safeErrorText(res);
-      throw new Error(errText || "Credenciales inválidas");
-    }
-
-    // Flujo normal de refresh si ya había token y no es endpoint /auth/...
     if (!refreshing) {
       refreshing = true;
       try {
@@ -185,8 +149,7 @@ async function request(
     } else {
       await new Promise((resolve) => waiters.push(resolve));
     }
-
-    // retry una vez con el token ya rotado
+    // retry una vez, con token ya actualizado en storage
     const retried = await fetch(url, {
       ...opts,
       headers: buildHeaders(headers, storage.get(), method, body),
@@ -241,9 +204,7 @@ export async function doLogin(email, password, remember = false) {
   return data;
 }
 export async function doLogout() {
-  try {
-    await api.post("/auth/logout");
-  } catch {}
+  try { await api.post("/auth/logout"); } catch {}
   storage.clear();
   if (typeof window !== "undefined") window.location.href = "/login";
 }
