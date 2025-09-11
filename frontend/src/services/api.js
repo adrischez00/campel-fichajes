@@ -18,10 +18,16 @@ const storage = {
   get() {
     let v = null;
     if (typeof sessionStorage !== "undefined") {
-      for (const k of ACCESS_KEYS) { v ||= sessionStorage.getItem(k); if (v) break; }
+      for (const k of ACCESS_KEYS) {
+        v ||= sessionStorage.getItem(k);
+        if (v) break;
+      }
     }
     if (!v && typeof localStorage !== "undefined") {
-      for (const k of ACCESS_KEYS) { v ||= localStorage.getItem(k); if (v) break; }
+      for (const k of ACCESS_KEYS) {
+        v ||= localStorage.getItem(k);
+        if (v) break;
+      }
     }
     return v;
   },
@@ -55,7 +61,9 @@ function assertNoMixedContent() {
     window.location.protocol === "https:" &&
     API_URL.startsWith("http://")
   ) {
-    throw new Error(`Mixed content: app en HTTPS pero API_URL=${API_URL}. Usa HTTPS en VITE_API_URL.`);
+    throw new Error(
+      `Mixed content: app en HTTPS pero API_URL=${API_URL}. Usa HTTPS en VITE_API_URL.`
+    );
   }
 }
 // API_URL ya termina en /api. Evita duplicar si alguien pasa "/api/...."
@@ -75,7 +83,8 @@ function buildHeaders(extraHeaders = {}, token, method, body) {
   const headers = { ...extraHeaders };
   const t = token ?? storage.get();
   if (t) headers.Authorization = `Bearer ${t}`;
-  const isFormData = (typeof FormData !== "undefined") && body instanceof FormData;
+  const isFormData =
+    typeof FormData !== "undefined" && body instanceof FormData;
   if (willSendBody(method, body) && !headers["Content-Type"] && !isFormData) {
     headers["Content-Type"] = "application/json";
   }
@@ -85,9 +94,14 @@ function buildHeaders(extraHeaders = {}, token, method, body) {
 async function safeErrorText(res) {
   try {
     const j = await res.json();
-    return j?.detail || JSON.stringify(j);
+    // FastAPI suele devolver { detail: "..." }
+    return j?.detail || j?.message || JSON.stringify(j);
   } catch {
-    try { return await res.text(); } catch { return null; }
+    try {
+      return await res.text();
+    } catch {
+      return null;
+    }
   }
 }
 async function parseBody(res) {
@@ -96,27 +110,17 @@ async function parseBody(res) {
   return txt ? JSON.parse(txt) : null;
 }
 
-// === helper: detectar endpoints de auth para NO refrescar ni redirigir en 401 ===
-function isAuthEndpoint(url) {
-  try {
-    const u = new URL(url, API_URL);
-    return /\/auth\/(login|login-json|token|refresh|logout)$/.test(u.pathname);
-  } catch {
-    return false;
-  }
-}
-function onLoginPage() {
-  return typeof window !== "undefined" && window.location.pathname === "/login";
-}
-
 // ====== refresh concurrente (cola) ======
 let refreshing = false;
 let waiters = [];
 
-// Llamada explícita a refresh (se hace con fetch aparte)
 async function refreshAccess() {
   const url = join("/auth/refresh");
-  const opts = { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" } };
+  const opts = {
+    method: "POST",
+    credentials: "include",
+    headers: { "Content-Type": "application/json" },
+  };
   const res = await fetch(url, opts);
   if (!res.ok) {
     storage.clear();
@@ -130,28 +134,40 @@ async function refreshAccess() {
 }
 
 // ====== core request ======
-async function request(method, endpoint, { body, token = null, headers = {}, signal, retry = false } = {}) {
+async function request(
+  method,
+  endpoint,
+  { body, token = null, headers = {}, signal, retry = false } = {}
+) {
   assertNoMixedContent();
 
   const url = join(endpoint);
   const opts = { method, signal };
-  const isFormData = (typeof FormData !== "undefined") && body instanceof FormData;
+  const isFormData =
+    typeof FormData !== "undefined" && body instanceof FormData;
   opts.headers = buildHeaders(headers, token, method, body);
   if (willSendBody(method, body)) {
-    opts.body = isFormData ? body : (typeof body === "string" ? body : JSON.stringify(body));
+    opts.body = isFormData
+      ? body
+      : typeof body === "string"
+      ? body
+      : JSON.stringify(body);
   }
   if (USE_CREDENTIALS) opts.credentials = "include";
 
   const res = await fetch(url, opts);
 
-  // 401 → refresco automático EXCEPTO si la llamada era a auth (login/token/refresh)
+  // --- manejo 401: NO hacer refresh si es auth o si no hay token aún
+  const hasToken = !!(token ?? storage.get());
+  const isAuthEndpoint = /^\/auth\//.test(normalizePath(endpoint));
+
   if (res.status === 401 && !retry) {
-    if (isAuthEndpoint(url)) {
+    if (!hasToken || isAuthEndpoint) {
       const errText = await safeErrorText(res);
-      // No intentamos refresh ni redirigimos; devolvemos el error limpio
       throw new Error(errText || "Credenciales inválidas");
     }
 
+    // Flujo normal de refresh si ya había token y no es endpoint /auth/...
     if (!refreshing) {
       refreshing = true;
       try {
@@ -160,9 +176,7 @@ async function request(method, endpoint, { body, token = null, headers = {}, sig
       } catch (err) {
         waiters.forEach((resume) => resume());
         storage.clear();
-        if (typeof window !== "undefined" && !onLoginPage()) {
-          window.location.href = "/login";
-        }
+        if (typeof window !== "undefined") window.location.href = "/login";
         throw err;
       } finally {
         refreshing = false;
@@ -172,7 +186,7 @@ async function request(method, endpoint, { body, token = null, headers = {}, sig
       await new Promise((resolve) => waiters.push(resolve));
     }
 
-    // retry una vez, con token ya actualizado en storage
+    // retry una vez con el token ya rotado
     const retried = await fetch(url, {
       ...opts,
       headers: buildHeaders(headers, storage.get(), method, body),
@@ -180,9 +194,7 @@ async function request(method, endpoint, { body, token = null, headers = {}, sig
     if (!retried.ok) {
       if (retried.status === 401) {
         storage.clear();
-        if (typeof window !== "undefined" && !onLoginPage()) {
-          window.location.href = "/login";
-        }
+        if (typeof window !== "undefined") window.location.href = "/login";
       }
       const errText = await safeErrorText(retried);
       throw new Error(errText || `Error ${retried.status} en ${endpoint}`);
@@ -228,9 +240,10 @@ export async function doLogin(email, password, remember = false) {
   storage.set(access, remember);
   return data;
 }
-
 export async function doLogout() {
-  try { await api.post("/auth/logout"); } catch {}
+  try {
+    await api.post("/auth/logout");
+  } catch {}
   storage.clear();
   if (typeof window !== "undefined") window.location.href = "/login";
 }
@@ -252,4 +265,3 @@ export function fetchUserWorkingDays(...args) {
   // alias usado por AusenciasCalendario.jsx
   return fetchWorkingDays(...args);
 }
-
