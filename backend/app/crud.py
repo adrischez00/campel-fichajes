@@ -6,7 +6,7 @@ from typing import Optional, List, Dict
 
 import pytz
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, or_, text
+from sqlalchemy import and_, or_, text, func
 from sqlalchemy.exc import SQLAlchemyError
 
 from app import models
@@ -45,8 +45,18 @@ def _safe_iso(dt: Optional[datetime]) -> Optional[str]:
 #  Usuarios
 # ========================
 def obtener_usuario_por_email(db: Session, email: str):
-    return db.query(models.User).filter(models.User.email == email).first()
-
+    """
+    Busca el usuario por email de forma case-insensitive y sin espacios.
+    Evita fallos si el usuario escribe M2@CAMPel.com o con espacios.
+    """
+    if not email:
+        return None
+    e = email.strip()
+    return (
+        db.query(models.User)
+        .filter(func.lower(models.User.email) == e.lower())
+        .first()
+    )
 
 def obtener_usuario_por_id(db: Session, user_id: int) -> Optional[models.User]:
     return db.query(models.User).filter(models.User.id == user_id).first()
