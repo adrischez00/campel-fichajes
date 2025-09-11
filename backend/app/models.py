@@ -34,31 +34,53 @@ class Fichaje(Base):
     __tablename__ = "fichajes"
 
     id = Column(Integer, primary_key=True, index=True)
-    tipo = Column(String, nullable=False)
+    tipo = Column(String, nullable=False)  # 'entrada' | 'salida'
     # Aware + default en BD (UTC)
     timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
     hash = Column(String, nullable=False)
     is_manual = Column(Boolean, default=False)
     motivo = Column(String, nullable=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
 
+    # === NUEVO: estado de cómputo del fichaje (para “asistido”)
+    # 'valido'       -> suma al total (normal)
+    # 'provisional'  -> visible, NO suma hasta aprobación admin
+    # 'invalidado'   -> visible, NO suma (rechazado por admin)
+    validez = Column(String, nullable=False, default="valido", index=True)
+
+    # === NUEVO: vínculo opcional a la solicitud que lo originó (1:1)
+    solicitud_id = Column(Integer, ForeignKey("solicitudes.id", ondelete="SET NULL"), nullable=True, index=True)
+
+    user_id = Column(Integer, ForeignKey("users.id"))
     usuario = relationship("User", back_populates="fichajes")
+
+    # Relación inversa a SolicitudManual (1:1 práctico)
+    solicitud = relationship("SolicitudManual", back_populates="fichaje", uselist=False)
 
 
 class SolicitudManual(Base):
     __tablename__ = "solicitudes"
 
     id = Column(Integer, primary_key=True, index=True)
-    fecha = Column(String, nullable=False)
-    hora = Column(String, nullable=False)
-    tipo = Column(String, nullable=False)
+    fecha = Column(String, nullable=False)          # input del usuario
+    hora = Column(String, nullable=False)           # input del usuario
+    tipo = Column(String, nullable=False)           # 'entrada' | 'salida'
     motivo = Column(String, nullable=False)
-    estado = Column(String, default="pendiente")
-    # Aware + default en BD (UTC)
+    estado = Column(String, default="pendiente")    # 'pendiente' | 'aprobada' | 'rechazada'
+    # Aware + default en BD (UTC) (momento real solicitado)
     timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    user_id = Column(Integer, ForeignKey("users.id"))
 
+    user_id = Column(Integer, ForeignKey("users.id"))
     usuario = relationship("User", back_populates="solicitudes")
+
+    # === NUEVO: metadatos de gestión (evita getattr en CRUD)
+    gestionado_por_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    gestionado_por = relationship("User", foreign_keys=[gestionado_por_id])
+    gestionado_en = Column(DateTime(timezone=True), nullable=True)
+    motivo_rechazo = Column(String, nullable=True)
+    ip_origen = Column(String, nullable=True)
+
+    # === NUEVO: enlace 1:1 al fichaje resultante (si se generó)
+    fichaje = relationship("Fichaje", back_populates="solicitud", uselist=False)
 
 
 class LogAuditoria(Base):
@@ -196,5 +218,4 @@ class CalendarFeedStg(Base):
     region_id = Column(Integer, ForeignKey("regions.id", ondelete="SET NULL"), index=True, nullable=True)
     locality_id = Column(Integer, ForeignKey("localities.id", ondelete="SET NULL"), index=True, nullable=True)
     fuente = Column(String, nullable=True)
-    imported_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-
+    imported_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now()) este?
