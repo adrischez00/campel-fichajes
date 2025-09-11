@@ -41,8 +41,7 @@ class Fichaje(Base):
     is_manual = Column(Boolean, default=False)
     motivo = Column(String, nullable=True)
 
-    # === estado de cómputo (asistido)
-    # 'valido' | 'provisional' | 'invalidado'
+    # estado de cómputo (asistido): 'valido' | 'provisional' | 'invalidado'
     validez = Column(String, nullable=False, default="valido", index=True)
 
     # vínculo 1:1 opcional con solicitud

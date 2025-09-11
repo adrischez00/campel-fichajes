@@ -140,3 +140,4 @@ def legacy_login(response: Response, form: OAuth2PasswordRequestForm = Depends()
 @legacy.post("/login/token")
 def legacy_login_token(response: Response, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     return _login(db, form.username, form.password, response)
+

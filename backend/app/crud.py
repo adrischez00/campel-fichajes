@@ -41,10 +41,9 @@ def _safe_iso(dt: Optional[datetime]) -> Optional[str]:
 #  Usuarios
 # ========================
 
-
 def obtener_usuario_por_email(db: Session, email: str):
     """
-    Búsqueda robusta: case-insensitive y sin espacios en BD ni en la entrada.
+    Búsqueda robusta: case-insensitive y trim en BD y en la entrada.
     """
     if not email:
         return None
@@ -54,7 +53,6 @@ def obtener_usuario_por_email(db: Session, email: str):
         .filter(func.lower(func.trim(models.User.email)) == e.lower())
         .first()
     )
-
 
 def obtener_usuario_por_id(db: Session, user_id: int) -> Optional[models.User]:
     return db.query(models.User).filter(models.User.id == user_id).first()
@@ -492,6 +490,4 @@ def obtener_logs(db: Session):
         })
     return resultado
 
-# ======= (resto: resumen fichajes, ausencias, calendario) =======
-# (idéntico a tu última versión que ya pegaste, sin cambios funcionales)
-# ...
+# (resto de helpers y calendario igual que ya tenías)
