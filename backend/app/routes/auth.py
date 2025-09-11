@@ -67,15 +67,26 @@ def _safe_verify(plain: str, hashed: str) -> bool:
 def _login(db: Session, username_or_email: str, password: str, response: Response):
     user = obtener_usuario_por_email(db, username_or_email)
     if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
+        raise HTTPException(status_code=401, detail="usuario_no_encontrado")
+
     hashed = (
         getattr(user, "hashed_password", None)
         or getattr(user, "password_hash", None)
         or getattr(user, "password", None)
     )
-    if not hashed or not _safe_verify(password, hashed):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
+    if not hashed:
+        raise HTTPException(status_code=401, detail="sin_hash_en_bd")
+
+    try:
+        ok = verificar_password(password, hashed)
+    except Exception:
+        ok = False
+
+    if not ok:
+        raise HTTPException(status_code=401, detail="password_incorrecto")
+
     return _token_response(user, response)
+
 
 # ================= Endpoints =================
 @router.post("/login", summary="Login (form-urlencoded: username, password)")
