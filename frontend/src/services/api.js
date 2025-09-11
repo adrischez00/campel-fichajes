@@ -1,8 +1,7 @@
 // src/services/api.js
 
 // === BASE URL (HTTPS-safe y con sufijo /api garantizado) ===
-const RAW = (import.meta.env?.VITE_API_URL || "http://localhost:8000")
-  .replace(/\/+$/, "");
+const RAW = (import.meta.env?.VITE_API_URL || "http://localhost:8000").replace(/\/+$/, "");
 const RAW_SECURE =
   typeof window !== "undefined" && window.location.protocol === "https:"
     ? RAW.replace(/^http:\/\//, "https://")
@@ -97,10 +96,24 @@ async function parseBody(res) {
   return txt ? JSON.parse(txt) : null;
 }
 
+// === helper: detectar endpoints de auth para NO refrescar ni redirigir en 401 ===
+function isAuthEndpoint(url) {
+  try {
+    const u = new URL(url, API_URL);
+    return /\/auth\/(login|login-json|token|refresh|logout)$/.test(u.pathname);
+  } catch {
+    return false;
+  }
+}
+function onLoginPage() {
+  return typeof window !== "undefined" && window.location.pathname === "/login";
+}
+
 // ====== refresh concurrente (cola) ======
 let refreshing = false;
 let waiters = [];
 
+// Llamada explícita a refresh (se hace con fetch aparte)
 async function refreshAccess() {
   const url = join("/auth/refresh");
   const opts = { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" } };
@@ -131,7 +144,14 @@ async function request(method, endpoint, { body, token = null, headers = {}, sig
 
   const res = await fetch(url, opts);
 
+  // 401 → refresco automático EXCEPTO si la llamada era a auth (login/token/refresh)
   if (res.status === 401 && !retry) {
+    if (isAuthEndpoint(url)) {
+      const errText = await safeErrorText(res);
+      // No intentamos refresh ni redirigimos; devolvemos el error limpio
+      throw new Error(errText || "Credenciales inválidas");
+    }
+
     if (!refreshing) {
       refreshing = true;
       try {
@@ -140,7 +160,9 @@ async function request(method, endpoint, { body, token = null, headers = {}, sig
       } catch (err) {
         waiters.forEach((resume) => resume());
         storage.clear();
-        if (typeof window !== "undefined") window.location.href = "/login";
+        if (typeof window !== "undefined" && !onLoginPage()) {
+          window.location.href = "/login";
+        }
         throw err;
       } finally {
         refreshing = false;
@@ -149,6 +171,7 @@ async function request(method, endpoint, { body, token = null, headers = {}, sig
     } else {
       await new Promise((resolve) => waiters.push(resolve));
     }
+
     // retry una vez, con token ya actualizado en storage
     const retried = await fetch(url, {
       ...opts,
@@ -157,7 +180,9 @@ async function request(method, endpoint, { body, token = null, headers = {}, sig
     if (!retried.ok) {
       if (retried.status === 401) {
         storage.clear();
-        if (typeof window !== "undefined") window.location.href = "/login";
+        if (typeof window !== "undefined" && !onLoginPage()) {
+          window.location.href = "/login";
+        }
       }
       const errText = await safeErrorText(retried);
       throw new Error(errText || `Error ${retried.status} en ${endpoint}`);
@@ -203,6 +228,7 @@ export async function doLogin(email, password, remember = false) {
   storage.set(access, remember);
   return data;
 }
+
 export async function doLogout() {
   try { await api.post("/auth/logout"); } catch {}
   storage.clear();
@@ -226,3 +252,4 @@ export function fetchUserWorkingDays(...args) {
   // alias usado por AusenciasCalendario.jsx
   return fetchWorkingDays(...args);
 }
+
