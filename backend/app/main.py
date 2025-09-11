@@ -9,7 +9,7 @@ from fastapi import FastAPI, Depends, HTTPException, status, Header, Form, Reque
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, Response, JSONResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
@@ -35,10 +35,9 @@ app = FastAPI(redirect_slashes=False)
 def health():
     return {"ok": True}
 
-# Alias canónico /api/health
 app.add_api_route("/api/health", health, methods=["GET"])
 
-# ---------------- CORS (Cloudflare Pages + previews + localhost) ----------------
+# ---------------- CORS ----------------
 STATIC_ALLOWED = [
     "https://sistema-fichajes.pages.dev",
     "https://campel-fichajes.pages.dev",
@@ -48,12 +47,9 @@ PAGES_PREVIEWS_REGEX = os.getenv("ALLOW_ORIGIN_REGEX", DEFAULT_PREVIEWS_REGEX)
 
 ALLOW_LOCALHOST = os.getenv("ALLOW_LOCALHOST", "1") not in ("0", "false", "False")
 LOCALHOST_ALLOWED = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "http://localhost:4173",
-    "http://127.0.0.1:4173",
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
+    "http://localhost:5173", "http://127.0.0.1:5173",
+    "http://localhost:4173", "http://127.0.0.1:4173",
+    "http://localhost:3000", "http://127.0.0.1:3000",
 ]
 
 extra = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
@@ -70,17 +66,40 @@ app.add_middleware(
     max_age=600,
 )
 
-# Asegurar cabeceras CORS también en 401/500 (Cloud Run)
+# Extra: asegurar cabeceras CORS en preflight y también cuando hay 4xx/5xx
 @app.middleware("http")
 async def ensure_cors_headers(request: Request, call_next):
-    response = await call_next(request)
     origin = request.headers.get("origin")
     allowed = False
     if origin:
         try:
-            allowed = origin in ALLOWED_ORIGINS or (re.match(PAGES_PREVIEWS_REGEX, origin or "") is not None)
+            allowed = (origin in ALLOWED_ORIGINS) or (re.match(PAGES_PREVIEWS_REGEX, origin or "") is not None)
         except Exception:
             allowed = False
+
+    # Preflight
+    if request.method == "OPTIONS":
+        resp = Response(status_code=200)
+        if allowed:
+            resp.headers["Access-Control-Allow-Origin"] = origin
+            resp.headers["Vary"] = "Origin"
+            resp.headers["Access-Control-Allow-Credentials"] = "true"
+            resp.headers["Access-Control-Allow-Headers"] = request.headers.get(
+                "access-control-request-headers", "authorization,content-type,x-requested-with"
+            )
+            resp.headers["Access-Control-Allow-Methods"] = request.headers.get(
+                "access-control-request-method", "GET,POST,PUT,PATCH,DELETE,OPTIONS"
+            )
+            resp.headers["Access-Control-Max-Age"] = "600"
+        return resp
+
+    try:
+        response = await call_next(request)
+    except Exception as e:
+        # Log opcional
+        print("[ensure_cors_headers] exception:", repr(e))
+        response = JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
+
     if allowed:
         response.headers["Access-Control-Allow-Origin"] = origin
         response.headers["Vary"] = "Origin"
@@ -89,6 +108,7 @@ async def ensure_cors_headers(request: Request, call_next):
 
 # ---------------- Zona horaria + helper ----------------
 TZ_MADRID = pytz.timezone("Europe/Madrid")
+
 def _safe_iso(dt: Optional[datetime]) -> Optional[str]:
     if not dt:
         return None
@@ -110,7 +130,7 @@ class RegistroIn(BaseModel):
     password: str
     role: str = "employee"
 
-# ==================== HANDLERS ====================
+# ==================== HANDLERS (igual que tenías) ====================
 def login_handler(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = crud.autenticar_usuario(db, form_data.username, form_data.password)
     if not user:
@@ -158,6 +178,7 @@ def fichar_handler(tipo: str = Form(...), db: Session = Depends(get_db), usuario
         )
         era_entrada_abierta = bool(ultimo_antes and (ultimo_antes.tipo or "").lower() == "entrada")
         ultima_entrada_ts = ultimo_antes.timestamp if era_entrada_abierta else None
+
         fich = crud.crear_fichaje(db, tipo, usuario)
 
         auto_aplicado, solicitud_id, cerrado_en = False, None, None
@@ -184,8 +205,17 @@ def fichar_handler(tipo: str = Form(...), db: Session = Depends(get_db), usuario
 
         return {
             "ok": True,
-            "fichaje": {"id": fich.id, "tipo": fich.tipo, "timestamp": _safe_iso(fich.timestamp), "is_manual": bool(getattr(fich, "is_manual", False))},
-            "auto_cierre": {"aplicado": auto_aplicado, "solicitud_id": solicitud_id, "cerrado_en": cerrado_en},
+            "fichaje": {
+                "id": fich.id,
+                "tipo": fich.tipo,
+                "timestamp": _safe_iso(fich.timestamp),
+                "is_manual": bool(getattr(fich, "is_manual", False)),
+            },
+            "auto_cierre": {
+                "aplicado": auto_aplicado,
+                "solicitud_id": solicitud_id,
+                "cerrado_en": cerrado_en,
+            },
         }
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
