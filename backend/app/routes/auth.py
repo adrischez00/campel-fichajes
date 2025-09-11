@@ -1,4 +1,3 @@
-# backend/app/routes/auth.py
 from datetime import timedelta
 import os
 
@@ -11,7 +10,7 @@ from app.database import get_db
 from app.crud import obtener_usuario_por_email
 from app.auth import (
     verificar_password,
-    crear_token_acceso,   # genera JWT con expiración configurable
+    crear_token_acceso,
     decodificar_token,
 )
 
@@ -43,11 +42,9 @@ class LoginJSON(BaseModel):
     password: str
 
 def _issue_access(email: str) -> str:
-    # access corto (por defecto 60 min en crear_token_acceso)
     return crear_token_acceso({"sub": email, "type": "access"})
 
 def _issue_refresh(email: str) -> str:
-    # refresh largo (30 días por defecto)
     return crear_token_acceso({"sub": email, "type": "refresh"},
                               expires_delta=timedelta(days=REFRESH_DAYS))
 
@@ -65,7 +62,6 @@ def _safe_verify(plain: str, hashed: str) -> bool:
     try:
         return verificar_password(plain, hashed)
     except Exception:
-        # Si el hash es inválido/antiguo/ en texto plano, no reventamos.
         return False
 
 def _login(db: Session, username_or_email: str, password: str, response: Response):
@@ -89,7 +85,6 @@ def login_form(response: Response, form: OAuth2PasswordRequestForm = Depends(), 
     except HTTPException:
         raise
     except Exception as e:
-        # Nunca 500 hacia el front en login
         print("[LOGIN_ERR]", repr(e))
         raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
@@ -123,7 +118,7 @@ def refresh(request: Request, response: Response):
         raise HTTPException(status_code=401, detail="Refresh inválido")
     email = data["sub"]
     new_access = _issue_access(email)
-    new_refresh = _issue_refresh(email)  # rotación
+    new_refresh = _issue_refresh(email)
     _set_refresh_cookie(response, new_refresh)
     return {"access_token": new_access, "token_type": "bearer"}
 
@@ -137,7 +132,7 @@ def logout(response: Response):
     )
     return {"ok": True}
 
-# ===== Aliases legacy (/api/login y /api/login/token) =====
+# Aliases legacy
 @legacy.post("/login")
 def legacy_login(response: Response, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     return _login(db, form.username, form.password, response)

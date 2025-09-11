@@ -1,4 +1,3 @@
-# backend/app/main.py
 import os
 import re
 from typing import List, Optional
@@ -9,12 +8,12 @@ from fastapi import FastAPI, Depends, HTTPException, status, Header, Form, Reque
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import RedirectResponse, Response, JSONResponse
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 
 from app.routes import auth as auth_routes
-from app import database, crud, auth, utils, models
+from app import crud, auth, utils, models
 from app.database import engine, get_db
 from app.models import Base, User
 from app.schemas import UserOut, UsuarioUpdate, UsuarioPassword
@@ -47,9 +46,12 @@ PAGES_PREVIEWS_REGEX = os.getenv("ALLOW_ORIGIN_REGEX", DEFAULT_PREVIEWS_REGEX)
 
 ALLOW_LOCALHOST = os.getenv("ALLOW_LOCALHOST", "1") not in ("0", "false", "False")
 LOCALHOST_ALLOWED = [
-    "http://localhost:5173", "http://127.0.0.1:5173",
-    "http://localhost:4173", "http://127.0.0.1:4173",
-    "http://localhost:3000", "http://127.0.0.1:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
 ]
 
 extra = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
@@ -61,50 +63,10 @@ app.add_middleware(
     allow_origin_regex=PAGES_PREVIEWS_REGEX,
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Requested-With", "Origin", "Accept"],
+    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
     expose_headers=["Content-Disposition"],
     max_age=600,
 )
-
-# Extra: asegurar cabeceras CORS en preflight y también cuando hay 4xx/5xx
-@app.middleware("http")
-async def ensure_cors_headers(request: Request, call_next):
-    origin = request.headers.get("origin")
-    allowed = False
-    if origin:
-        try:
-            allowed = (origin in ALLOWED_ORIGINS) or (re.match(PAGES_PREVIEWS_REGEX, origin or "") is not None)
-        except Exception:
-            allowed = False
-
-    # Preflight
-    if request.method == "OPTIONS":
-        resp = Response(status_code=200)
-        if allowed:
-            resp.headers["Access-Control-Allow-Origin"] = origin
-            resp.headers["Vary"] = "Origin"
-            resp.headers["Access-Control-Allow-Credentials"] = "true"
-            resp.headers["Access-Control-Allow-Headers"] = request.headers.get(
-                "access-control-request-headers", "authorization,content-type,x-requested-with"
-            )
-            resp.headers["Access-Control-Allow-Methods"] = request.headers.get(
-                "access-control-request-method", "GET,POST,PUT,PATCH,DELETE,OPTIONS"
-            )
-            resp.headers["Access-Control-Max-Age"] = "600"
-        return resp
-
-    try:
-        response = await call_next(request)
-    except Exception as e:
-        # Log opcional
-        print("[ensure_cors_headers] exception:", repr(e))
-        response = JSONResponse(status_code=500, content={"detail": "Internal Server Error"})
-
-    if allowed:
-        response.headers["Access-Control-Allow-Origin"] = origin
-        response.headers["Vary"] = "Origin"
-        response.headers["Access-Control-Allow-Credentials"] = "true"
-    return response
 
 # ---------------- Zona horaria + helper ----------------
 TZ_MADRID = pytz.timezone("Europe/Madrid")
@@ -130,7 +92,7 @@ class RegistroIn(BaseModel):
     password: str
     role: str = "employee"
 
-# ==================== HANDLERS (igual que tenías) ====================
+# ==================== HANDLERS ====================
 def login_handler(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
     user = crud.autenticar_usuario(db, form_data.username, form_data.password)
     if not user:
@@ -138,7 +100,11 @@ def login_handler(form_data: OAuth2PasswordRequestForm = Depends(), db: Session 
     token = auth.crear_token_acceso({"sub": user.email, "role": user.role})
     return {"access_token": token, "token_type": "bearer"}
 
-def registrar_handler(datos: RegistroIn, db: Session = Depends(get_db), solicitante: User = Depends(get_current_user)):
+def registrar_handler(
+    datos: RegistroIn,
+    db: Session = Depends(get_db),
+    solicitante: User = Depends(get_current_user)
+):
     if solicitante.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
     existente = crud.obtener_usuario_por_email(db, datos.email)
@@ -148,27 +114,49 @@ def registrar_handler(datos: RegistroIn, db: Session = Depends(get_db), solicita
     utils.log_evento(db, solicitante, "crear_usuario", f"Creó a {datos.email} como {datos.role}")
     return nuevo
 
-def listar_usuarios_handler(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def listar_usuarios_handler(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     if current_user.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
     return db.query(User).all()
 
-def actualizar_usuario_handler(usuario_id: int, datos: UsuarioUpdate, db: Session = Depends(get_db), usuario: User = Depends(get_current_user)):
+def actualizar_usuario_handler(
+    usuario_id: int,
+    datos: UsuarioUpdate,
+    db: Session = Depends(get_db),
+    usuario: User = Depends(get_current_user)
+):
     if usuario.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
     return crud.editar_usuario(db, usuario_id, datos.email, datos.role)
 
-def eliminar_usuario_handler(usuario_id: int, db: Session = Depends(get_db), usuario: User = Depends(get_current_user)):
+def eliminar_usuario_handler(
+    usuario_id: int,
+    db: Session = Depends(get_db),
+    usuario: User = Depends(get_current_user)
+):
     if usuario.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
     return crud.eliminar_usuario(db, usuario_id)
 
-def restablecer_password_handler(usuario_id: int, datos: UsuarioPassword, db: Session = Depends(get_db), usuario: User = Depends(get_current_user)):
+def restablecer_password_handler(
+    usuario_id: int,
+    datos: UsuarioPassword,
+    db: Session = Depends(get_db),
+    usuario: User = Depends(get_current_user)
+):
     if usuario.role != "admin":
         raise HTTPException(status_code=403, detail="No autorizado")
     return crud.restablecer_password(db, usuario_id, datos.nueva_password)
 
-def fichar_handler(tipo: str = Form(...), db: Session = Depends(get_db), usuario: User = Depends(get_current_user)):
+# ---- Fichajes ----
+def fichar_handler(
+    tipo: str = Form(...),
+    db: Session = Depends(get_db),
+    usuario: User = Depends(get_current_user)
+):
     try:
         ultimo_antes = (
             db.query(models.Fichaje)
@@ -183,7 +171,7 @@ def fichar_handler(tipo: str = Form(...), db: Session = Depends(get_db), usuario
 
         auto_aplicado, solicitud_id, cerrado_en = False, None, None
         if (tipo or "").lower() == "entrada" and era_entrada_abierta and ultima_entrada_ts:
-            pat = re.compile(r"\[auto-cierre por solicitud #(\d+)\]")
+            pat = re.compile(r"\[asistido por solicitud #(\d+)\]")
             salidas = (
                 db.query(models.Fichaje)
                 .filter(
@@ -210,6 +198,7 @@ def fichar_handler(tipo: str = Form(...), db: Session = Depends(get_db), usuario
                 "tipo": fich.tipo,
                 "timestamp": _safe_iso(fich.timestamp),
                 "is_manual": bool(getattr(fich, "is_manual", False)),
+                "validez": (getattr(fich, "validez", "valido") or "valido"),
             },
             "auto_cierre": {
                 "aplicado": auto_aplicado,
@@ -228,12 +217,19 @@ def obtener_fichajes_handler(usuario: str = Header(...), db: Session = Depends(g
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return crud.obtener_fichajes_usuario(db, user)
 
-def resumen_fichajes_handler(db: Session = Depends(get_db), usuario: User = Depends(get_current_user)):
+def resumen_fichajes_handler(
+    db: Session = Depends(get_db),
+    usuario: User = Depends(get_current_user)
+):
     return crud.resumen_fichajes_usuario(db, usuario)
 
-def resumen_semana_handler(db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def resumen_semana_handler(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
     return crud.resumen_semana_usuario(db, current_user)
 
+# ---- Solicitudes ----
 def solicitar_fichaje_manual_handler(data: SolicitudManualIn, usuario: str = Header(...), db: Session = Depends(get_db)):
     user = crud.obtener_usuario_por_email(db, usuario)
     if not user:
@@ -243,19 +239,27 @@ def solicitar_fichaje_manual_handler(data: SolicitudManualIn, usuario: str = Hea
 def listar_solicitudes_handler(db: Session = Depends(get_db)):
     return crud.listar_solicitudes(db)
 
-def resolver_solicitud_handler(req: Request, body: ResolverSolicitudIn, db: Session = Depends(get_db), current_user: User = Depends(get_current_user)):
+def resolver_solicitud_handler(
+    req: Request,
+    body: ResolverSolicitudIn,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     if current_user.role not in ("admin", "manager"):
         raise HTTPException(status_code=403, detail="No autorizado")
+
     ip = req.client.host if req and req.client else None
     try:
         if body.aprobar:
             s = crud.aprobar_solicitud(db, body.id, admin=current_user, ip=ip)
         else:
-            s = crud.rechazar_solicitud(db, body.id, admin=current_user, motivo_rechazo=body.motivo_rechazo, ip=ip)
+            s = crud.rechazar_solicitud(db, body.id, admin=current_user,
+                                        motivo_rechazo=body.motivo_rechazo, ip=ip)
         return {"ok": True, "solicitud": s.id}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+# ---- Export ----
 def exportar_handler(usuario: str, db: Session = Depends(get_db)):
     usuario = usuario.strip()
     user = crud.obtener_usuario_por_email(db, usuario)
@@ -264,13 +268,14 @@ def exportar_handler(usuario: str, db: Session = Depends(get_db)):
     fichajes = crud.obtener_fichajes_usuario(db, user)
     return utils.exportar_pdf(user.email, fichajes)
 
-# ==================== MONTAJE CANÓNICO (/api) ====================
+# ==================== MONTAJE /api ====================
 app.include_router(auth_routes.router,     prefix="/api", tags=["auth"])
 app.include_router(calendar.router,        prefix="/api", tags=["calendar"])
 app.include_router(ausencias_router.router, prefix="/api")
 app.include_router(logs_router.router,     prefix="/api/logs")
 
 # Endpoints canónicos
+from app.schemas import UserOut, UsuarioUpdate, UsuarioPassword
 app.add_api_route("/api/registrar",             registrar_handler,             methods=["POST"])
 app.add_api_route("/api/usuarios",              listar_usuarios_handler,       methods=["GET"], response_model=List[UserOut])
 app.add_api_route("/api/usuarios/{usuario_id}", actualizar_usuario_handler,    methods=["PUT"])
@@ -285,9 +290,9 @@ app.add_api_route("/api/solicitudes",           listar_solicitudes_handler,    m
 app.add_api_route("/api/resolver-solicitud",    resolver_solicitud_handler,    methods=["POST"])
 app.add_api_route("/api/exportar-pdf",          exportar_handler,              methods=["GET"])
 
+# Aliases legacy
 app.include_router(auth_routes.legacy, prefix="/api")
 
-# Redirects legacy
 @app.api_route("/registrar", methods=["POST"], include_in_schema=False)
 def legacy_registrar_redirect():
     return RedirectResponse(url="/api/registrar", status_code=307)
@@ -349,9 +354,10 @@ def legacy_ausencias_wildcard_redirect(path: str):
     return RedirectResponse(url=f"/api/ausencias/{path}", status_code=307)
 
 # ---------------- Static ----------------
+from fastapi.staticfiles import StaticFiles
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# ---------------- Entrypoint (local dev) ----------------
+# ---------------- Entrypoint ----------------
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))

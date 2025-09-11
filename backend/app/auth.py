@@ -1,4 +1,3 @@
-# backend/app/auth.py
 import os
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -15,9 +14,9 @@ load_dotenv()
 
 SECRET_KEY = os.getenv("SECRET_KEY", "clave-secreta-super-segura")
 ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_MIN", "60"))
 
-# Acepta hashes antiguos/comunes además de bcrypt
+# acepta varios esquemas de hash
 pwd_context = CryptContext(
     schemes=["bcrypt", "pbkdf2_sha256", "sha256_crypt"],
     deprecated="auto"
@@ -66,4 +65,3 @@ def decodificar_token(token: str):
         return payload
     except JWTError:
         return None
-

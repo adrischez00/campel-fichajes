@@ -35,25 +35,23 @@ class Fichaje(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     tipo = Column(String, nullable=False)  # 'entrada' | 'salida'
-    # Aware + default en BD (UTC)
-    timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False,
+                       server_default=func.now(), index=True)
     hash = Column(String, nullable=False)
     is_manual = Column(Boolean, default=False)
     motivo = Column(String, nullable=True)
 
-    # === NUEVO: estado de cómputo del fichaje (para “asistido”)
-    # 'valido'       -> suma al total (normal)
-    # 'provisional'  -> visible, NO suma hasta aprobación admin
-    # 'invalidado'   -> visible, NO suma (rechazado por admin)
+    # === estado de cómputo (asistido)
+    # 'valido' | 'provisional' | 'invalidado'
     validez = Column(String, nullable=False, default="valido", index=True)
 
-    # === NUEVO: vínculo opcional a la solicitud que lo originó (1:1)
-    solicitud_id = Column(Integer, ForeignKey("solicitudes.id", ondelete="SET NULL"), nullable=True, index=True)
+    # vínculo 1:1 opcional con solicitud
+    solicitud_id = Column(Integer, ForeignKey("solicitudes.id", ondelete="SET NULL"),
+                          nullable=True, index=True)
 
     user_id = Column(Integer, ForeignKey("users.id"))
     usuario = relationship("User", back_populates="fichajes")
 
-    # Relación inversa a SolicitudManual (1:1 práctico)
     solicitud = relationship("SolicitudManual", back_populates="fichaje", uselist=False)
 
 
@@ -61,25 +59,24 @@ class SolicitudManual(Base):
     __tablename__ = "solicitudes"
 
     id = Column(Integer, primary_key=True, index=True)
-    fecha = Column(String, nullable=False)          # input del usuario
-    hora = Column(String, nullable=False)           # input del usuario
+    fecha = Column(String, nullable=False)
+    hora = Column(String, nullable=False)
     tipo = Column(String, nullable=False)           # 'entrada' | 'salida'
     motivo = Column(String, nullable=False)
     estado = Column(String, default="pendiente")    # 'pendiente' | 'aprobada' | 'rechazada'
-    # Aware + default en BD (UTC) (momento real solicitado)
     timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     user_id = Column(Integer, ForeignKey("users.id"))
     usuario = relationship("User", back_populates="solicitudes")
 
-    # === NUEVO: metadatos de gestión (evita getattr en CRUD)
+    # metadatos gestión
     gestionado_por_id = Column(Integer, ForeignKey("users.id"), nullable=True)
     gestionado_por = relationship("User", foreign_keys=[gestionado_por_id])
     gestionado_en = Column(DateTime(timezone=True), nullable=True)
     motivo_rechazo = Column(String, nullable=True)
     ip_origen = Column(String, nullable=True)
 
-    # === NUEVO: enlace 1:1 al fichaje resultante (si se generó)
+    # enlace 1:1 con fichaje generado
     fichaje = relationship("Fichaje", back_populates="solicitud", uselist=False)
 
 
@@ -90,8 +87,8 @@ class LogAuditoria(Base):
     accion = Column(String, nullable=False)
     detalle = Column(String, nullable=False)
     motivo = Column(String, nullable=True)
-    # Aware + default en BD (UTC)
-    timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), index=True)
+    timestamp = Column(DateTime(timezone=True), nullable=False,
+                       server_default=func.now(), index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
 
     usuario = relationship("User", back_populates="logs")
@@ -126,7 +123,8 @@ class Ausencia(Base):
     aprobada_por = Column(String, nullable=True)
 
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False,
+                        server_default=func.now(), onupdate=func.now())
 
     usuario = relationship(
         "User",
@@ -137,52 +135,36 @@ class Ausencia(Base):
 
 
 # =========================
-# Calendario & Localización (para Festivos)
+# Calendario & Localización
 # =========================
 
 class Region(Base):
-    """
-    Comunidad Autónoma u otra división regional.
-    """
     __tablename__ = "regions"
-
     id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False)      # p.ej. "Comunidad de Madrid"
-    code = Column(String, index=True)          # código INE/ISO si aplica
+    name = Column(String, nullable=False)
+    code = Column(String, index=True)
 
 
 class Locality(Base):
-    """
-    Municipio/localidad (si los usas para festivos locales).
-    """
     __tablename__ = "localities"
-
     id = Column(Integer, primary_key=True)
-    name = Column(String, nullable=False)      # p.ej. "Madrid"
+    name = Column(String, nullable=False)
     ine_code = Column(String, index=True)
     region_id = Column(Integer, ForeignKey("regions.id", ondelete="SET NULL"), index=True)
 
 
 class UserLocation(Base):
-    """
-    Última localización conocida del usuario (para resolver sus festivos).
-    """
     __tablename__ = "user_locations"
-
     id = Column(Integer, primary_key=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True)
     country_code = Column(String(2), nullable=False, default="ES", index=True)
     region_id = Column(Integer, ForeignKey("regions.id", ondelete="SET NULL"), index=True, nullable=True)
     locality_id = Column(Integer, ForeignKey("localities.id", ondelete="SET NULL"), index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-
     user = relationship("User")
 
 
 class CalendarMark(Base):
-    """
-    Marca de calendario: festivos nacionales, autonómicos o locales.
-    """
     __tablename__ = "calendar_marks"
 
     id = Column(Integer, primary_key=True)
@@ -204,9 +186,6 @@ class CalendarMark(Base):
 
 
 class CalendarFeedStg(Base):
-    """
-    Staging opcional para importar festivos desde ICS/CSV.
-    """
     __tablename__ = "calendar_feed_stg"
 
     id = Column(Integer, primary_key=True)
@@ -218,4 +197,4 @@ class CalendarFeedStg(Base):
     region_id = Column(Integer, ForeignKey("regions.id", ondelete="SET NULL"), index=True, nullable=True)
     locality_id = Column(Integer, ForeignKey("localities.id", ondelete="SET NULL"), index=True, nullable=True)
     fuente = Column(String, nullable=True)
-    imported_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now()) 
+    imported_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
