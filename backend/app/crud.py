@@ -40,15 +40,21 @@ def _safe_iso(dt: Optional[datetime]) -> Optional[str]:
 # ========================
 #  Usuarios
 # ========================
+
+
 def obtener_usuario_por_email(db: Session, email: str):
+    """
+    Búsqueda robusta: case-insensitive y sin espacios en BD ni en la entrada.
+    """
     if not email:
         return None
-    e = email.strip()
+    e = (email or "").strip()
     return (
         db.query(models.User)
-        .filter(func.lower(models.User.email) == e.lower())
+        .filter(func.lower(func.trim(models.User.email)) == e.lower())
         .first()
     )
+
 
 def obtener_usuario_por_id(db: Session, user_id: int) -> Optional[models.User]:
     return db.query(models.User).filter(models.User.id == user_id).first()
