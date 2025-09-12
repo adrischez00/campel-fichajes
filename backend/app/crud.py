@@ -40,32 +40,17 @@ def _normalize_email_for_compare(e: str) -> str:
 
 def obtener_usuario_por_email(db: Session, email: str):
     """
-    Búsqueda robusta:
-    - elimina TODOS los espacios (normales, NBSP, tabs, etc.)
-    - case-insensitive
-    - funciona aunque la columna tenga espacios raros guardados
+    Búsqueda robusta: trim + case-insensitive. Evita fallos por espacios
+    o mayúsculas en la BD o en la entrada.
     """
     if not email:
         return None
-    e_norm = _normalize_email_for_compare(email)
-
-    # Preferimos hacerlo en SQL (Postgres): regexp_replace
-    try:
-        return (
-            db.query(models.User)
-            .filter(
-                func.lower(
-                    func.regexp_replace(models.User.email, r'\s+', '', 'g')
-                ) == e_norm
-            )
-            .first()
-        )
-    except Exception:
-        # Fallback si el dialecto no soporta regexp_replace
-        for u in db.query(models.User).all():
-            if _normalize_email_for_compare(u.email) == e_norm:
-                return u
-        return None
+    e = (email or "").strip()
+    return (
+        db.query(models.User)
+        .filter(func.lower(func.trim(models.User.email)) == e.lower())
+        .first()
+    )
 
 
 def obtener_usuario_por_id(db: Session, user_id: int) -> Optional[models.User]:
