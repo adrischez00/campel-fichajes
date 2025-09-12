@@ -205,7 +205,6 @@ class CalendarMark(Base):
         ),
     )
 
-
 class CalendarFeedStg(Base):
     __tablename__ = "calendar_feed_stg"
 
