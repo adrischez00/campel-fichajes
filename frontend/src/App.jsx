@@ -9,55 +9,103 @@ import { ToastContainer } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import { ToastProvider } from "./components/ui/ToastContext";
 
-// 👇 helpers del wrapper pro (Opción B)
+// Helpers del wrapper
 import { getAccessToken, doLogout } from "./services/api";
+
+// --- helpers de persistencia para role/user ---
+const ROLE_KEY = "role";
+const USER_KEY = "user";
+
+function getSaved(key) {
+  try {
+    return (
+      (typeof localStorage !== "undefined" && localStorage.getItem(key)) ??
+      (typeof sessionStorage !== "undefined" && sessionStorage.getItem(key)) ??
+      null
+    );
+  } catch {
+    return null;
+  }
+}
+function setSaved(key, value) {
+  try {
+    // Si el access está en localStorage (recordarme), guarda ahí; si no, en sessionStorage
+    const useLocal =
+      typeof localStorage !== "undefined" &&
+      localStorage.getItem("access") != null;
+    if (useLocal && typeof localStorage !== "undefined") {
+      localStorage.setItem(key, value);
+    } else if (typeof sessionStorage !== "undefined") {
+      sessionStorage.setItem(key, value);
+    }
+  } catch {}
+}
+function clearSaved(keys) {
+  try {
+    for (const k of keys) {
+      if (typeof localStorage !== "undefined") localStorage.removeItem(k);
+      if (typeof sessionStorage !== "undefined") sessionStorage.removeItem(k);
+    }
+  } catch {}
+}
 
 export default function App() {
   const [session, setSession] = useState(null);
 
-  // Rehidratación en arranque: lee el access desde storage (session/local)
+  // Rehidratación en arranque
   useEffect(() => {
     const token =
       getAccessToken() ||
-      (typeof sessionStorage !== "undefined" && sessionStorage.getItem("token")); // compat antigua
+      (typeof sessionStorage !== "undefined" &&
+        sessionStorage.getItem("token")); // compat antigua
 
     if (!token) return;
+
+    // 1) Intentar role/user persistidos por Login.jsx
+    const roleSaved = (getSaved(ROLE_KEY) || "").toLowerCase();
+    const userSaved = getSaved(USER_KEY);
+
+    if (roleSaved) {
+      setSession({ token, role: roleSaved, user: userSaved });
+      return;
+    }
+
+    // 2) Fallback: decodificar JWT (por si en el futuro incluyes role en el token)
     try {
       const payload = JSON.parse(atob(token.split(".")[1] || ""));
-      // payload.sub = email; payload.role si lo incluyes
-      const role = payload.role || "employee";
+      const role = (payload.role || "employee").toLowerCase();
       const user = payload.sub || null;
       setSession({ token, role, user });
     } catch {
-      // si el token viejo no es decodificable, lo limpiamos
+      // token inválido -> limpiar compat antigua
       try {
-        sessionStorage.removeItem("token");
+        if (typeof sessionStorage !== "undefined")
+          sessionStorage.removeItem("token");
       } catch {}
     }
   }, []);
 
-  // Cuando Login te devuelva (según tu Login.jsx):
-  // - Si ya usas doLogin() dentro de Login.jsx, aquí basta con decodificar el nuevo token.
+  // Llamado desde <Login onLogin={...}/>
   const handleLogin = (s) => {
-    // s puede ser { access_token, user... } o un objeto de tu Login.jsx.
-    // Releer del storage para no depender del shape de s:
+    // s viene de Login.jsx: { token, role, user }
     const token = getAccessToken();
     if (!token) {
       setSession(null);
       return;
     }
-    try {
-      const payload = JSON.parse(atob(token.split(".")[1] || ""));
-      const role = payload.role || "employee";
-      const user = payload.sub || null;
-      setSession({ token, role, user });
-    } catch {
-      setSession(null);
-    }
+    const role = (s?.role || "employee").toLowerCase();
+    const user = s?.user || null;
+
+    // Guardar role/user para rehidratado correcto
+    setSaved(ROLE_KEY, role);
+    if (user) setSaved(USER_KEY, user);
+
+    setSession({ token, role, user });
   };
 
   const handleLogout = async () => {
-    await doLogout(); // borra cookie httpOnly (refresh) y limpia storage
+    await doLogout(); // limpia access y hace redirect a /login
+    clearSaved([ROLE_KEY, USER_KEY]);
     setSession(null);
   };
 

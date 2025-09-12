@@ -1,3 +1,4 @@
+# backend/app/routes/auth.py
 import os
 import traceback
 from datetime import timedelta
@@ -40,21 +41,24 @@ class LoginJSON(BaseModel):
     email: str
     password: str
 
-def _issue_access(email: str) -> str:
-    return crear_token_acceso({"sub": email, "type": "access"})
+def _issue_access(email: str, role: str | None) -> str:
+    # access con role embebido
+    return crear_token_acceso({"sub": email, "role": role, "type": "access"})
 
 def _issue_refresh(email: str) -> str:
+    # refresh largo (no necesitamos meter role aquí; lo cargamos de DB en /refresh)
     return crear_token_acceso({"sub": email, "type": "refresh"},
                               expires_delta=timedelta(days=REFRESH_DAYS))
 
 def _token_response(user, response: Response):
-    access = _issue_access(user.email)
+    role = getattr(user, "role", None)
+    access = _issue_access(user.email, role)
     refresh = _issue_refresh(user.email)
     _set_refresh_cookie(response, refresh)
     return {
         "access_token": access,
         "token_type": "bearer",
-        "user": {"email": user.email, "role": getattr(user, "role", None)},
+        "user": {"email": user.email, "role": role},
     }
 
 def _login(db: Session, username_or_email: str, password: str, response: Response):
@@ -105,18 +109,28 @@ def login_json(response: Response, payload: LoginJSON, db: Session = Depends(get
     return _login(db, payload.email, payload.password, response)
 
 @router.post("/refresh")
-def refresh(request: Request, response: Response):
+def refresh(request: Request, response: Response, db: Session = Depends(get_db)):
     token = request.cookies.get(COOKIE_NAME)
     if not token:
         raise HTTPException(status_code=401, detail="No refresh token")
     data = decodificar_token(token)
     if not data or data.get("type") != "refresh" or not data.get("sub"):
         raise HTTPException(status_code=401, detail="Refresh inválido")
+
     email = data["sub"]
-    new_access = _issue_access(email)
-    new_refresh = _issue_refresh(email)  # rotación
+    # Cargamos user para obtener el role actual
+    user = obtener_usuario_por_email(db, email)
+    if not user:
+        raise HTTPException(status_code=401, detail="Usuario no encontrado")
+
+    new_access = _issue_access(user.email, getattr(user, "role", None))
+    new_refresh = _issue_refresh(user.email)  # rotación
     _set_refresh_cookie(response, new_refresh)
-    return {"access_token": new_access, "token_type": "bearer"}
+    return {
+        "access_token": new_access,
+        "token_type": "bearer",
+        "user": {"email": user.email, "role": getattr(user, "role", None)}
+    }
 
 @router.post("/logout")
 def logout(response: Response):

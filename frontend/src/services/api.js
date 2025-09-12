@@ -14,20 +14,16 @@ const USE_CREDENTIALS = true;
 
 // ====== almacén de access token ======
 const ACCESS_KEYS = ["access", "access_token", "token"];
+const USER_KEYS = ["user", "profile"];
+
 const storage = {
   get() {
     let v = null;
     if (typeof sessionStorage !== "undefined") {
-      for (const k of ACCESS_KEYS) {
-        v ||= sessionStorage.getItem(k);
-        if (v) break;
-      }
+      for (const k of ACCESS_KEYS) { v ||= sessionStorage.getItem(k); if (v) break; }
     }
     if (!v && typeof localStorage !== "undefined") {
-      for (const k of ACCESS_KEYS) {
-        v ||= localStorage.getItem(k);
-        if (v) break;
-      }
+      for (const k of ACCESS_KEYS) { v ||= localStorage.getItem(k); if (v) break; }
     }
     return v;
   },
@@ -48,7 +44,39 @@ const storage = {
     }
   },
 };
+
+const userStore = {
+  get() {
+    let raw = null;
+    if (typeof sessionStorage !== "undefined") {
+      for (const k of USER_KEYS) { raw ||= sessionStorage.getItem(k); if (raw) break; }
+    }
+    if (!raw && typeof localStorage !== "undefined") {
+      for (const k of USER_KEYS) { raw ||= localStorage.getItem(k); if (raw) break; }
+    }
+    try { return raw ? JSON.parse(raw) : null; } catch { return null; }
+  },
+  set(user, remember = false) {
+    if (!user) return this.clear();
+    const json = JSON.stringify(user);
+    if (remember && typeof localStorage !== "undefined") {
+      localStorage.setItem("user", json);
+    } else if (typeof sessionStorage !== "undefined") {
+      sessionStorage.setItem("user", json);
+    }
+  },
+  clear() {
+    if (typeof sessionStorage !== "undefined") {
+      for (const k of USER_KEYS) sessionStorage.removeItem(k);
+    }
+    if (typeof localStorage !== "undefined") {
+      for (const k of USER_KEYS) localStorage.removeItem(k);
+    }
+  },
+};
+
 export const getAccessToken = () => storage.get();
+export const getStoredUser = () => userStore.get();
 
 // --- utils ---
 function normalizePath(endpoint) {
@@ -61,9 +89,7 @@ function assertNoMixedContent() {
     window.location.protocol === "https:" &&
     API_URL.startsWith("http://")
   ) {
-    throw new Error(
-      `Mixed content: app en HTTPS pero API_URL=${API_URL}. Usa HTTPS en VITE_API_URL.`
-    );
+    throw new Error(`Mixed content: app en HTTPS pero API_URL=${API_URL}. Usa HTTPS en VITE_API_URL.`);
   }
 }
 // API_URL ya termina en /api. Evita duplicar si alguien pasa "/api/...."
@@ -83,25 +109,57 @@ function buildHeaders(extraHeaders = {}, token, method, body) {
   const headers = { ...extraHeaders };
   const t = token ?? storage.get();
   if (t) headers.Authorization = `Bearer ${t}`;
-  const isFormData =
-    typeof FormData !== "undefined" && body instanceof FormData;
+  const isFormData = (typeof FormData !== "undefined") && body instanceof FormData;
   if (willSendBody(method, body) && !headers["Content-Type"] && !isFormData) {
     headers["Content-Type"] = "application/json";
   }
   return headers;
 }
 
+function base64UrlDecode(str) {
+  try {
+    const pad = "=".repeat((4 - (str.length % 4)) % 4);
+    const b64 = (str.replace(/-/g, "+").replace(/_/g, "/") + pad);
+    const decoded = typeof atob !== "undefined" ? atob(b64) : Buffer.from(b64, "base64").toString("binary");
+    // to UTF-8
+    const bytes = Uint8Array.from(decoded, c => c.charCodeAt(0));
+    return new TextDecoder().decode(bytes);
+  } catch {
+    return null;
+  }
+}
+function parseJwt(token) {
+  if (!token) return null;
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const json = base64UrlDecode(parts[1]);
+    return json ? JSON.parse(json) : null;
+  } catch { return null; }
+}
+function roleFromToken(t) {
+  return parseJwt(t)?.role ?? null;
+}
+
+export function getRole() {
+  return getStoredUser()?.role ?? roleFromToken(getAccessToken());
+}
+export function isAdmin() {
+  return (getRole() || "").toLowerCase() === "admin";
+}
+export function getAuthSnapshot() {
+  const token = getAccessToken();
+  const user = getStoredUser();
+  const role = user?.role ?? roleFromToken(token);
+  return { token, user, role };
+}
+
 async function safeErrorText(res) {
   try {
     const j = await res.json();
-    // FastAPI suele devolver { detail: "..." }
     return j?.detail || j?.message || JSON.stringify(j);
   } catch {
-    try {
-      return await res.text();
-    } catch {
-      return null;
-    }
+    try { return await res.text(); } catch { return null; }
   }
 }
 async function parseBody(res) {
@@ -116,42 +174,40 @@ let waiters = [];
 
 async function refreshAccess() {
   const url = join("/auth/refresh");
-  const opts = {
-    method: "POST",
-    credentials: "include",
-    headers: { "Content-Type": "application/json" },
-  };
+  const opts = { method: "POST", credentials: "include", headers: { "Content-Type": "application/json" } };
   const res = await fetch(url, opts);
   if (!res.ok) {
     storage.clear();
+    userStore.clear();
     throw new Error("No se pudo refrescar la sesión");
   }
   const data = await res.json();
   const newAccess = data?.access_token;
   if (!newAccess) throw new Error("Refresh sin access_token");
   storage.set(newAccess);
+
+  // Si backend devuelve user, lo guardamos; si no, derivamos role del token
+  if (data?.user) {
+    userStore.set(data.user);
+  } else {
+    const role = roleFromToken(newAccess);
+    const current = userStore.get() || {};
+    if (role && current?.role !== role) userStore.set({ ...current, role });
+  }
+
   return newAccess;
 }
 
 // ====== core request ======
-async function request(
-  method,
-  endpoint,
-  { body, token = null, headers = {}, signal, retry = false } = {}
-) {
+async function request(method, endpoint, { body, token = null, headers = {}, signal, retry = false } = {}) {
   assertNoMixedContent();
 
   const url = join(endpoint);
   const opts = { method, signal };
-  const isFormData =
-    typeof FormData !== "undefined" && body instanceof FormData;
+  const isFormData = (typeof FormData !== "undefined") && body instanceof FormData;
   opts.headers = buildHeaders(headers, token, method, body);
   if (willSendBody(method, body)) {
-    opts.body = isFormData
-      ? body
-      : typeof body === "string"
-      ? body
-      : JSON.stringify(body);
+    opts.body = isFormData ? body : (typeof body === "string" ? body : JSON.stringify(body));
   }
   if (USE_CREDENTIALS) opts.credentials = "include";
 
@@ -176,6 +232,7 @@ async function request(
       } catch (err) {
         waiters.forEach((resume) => resume());
         storage.clear();
+        userStore.clear();
         if (typeof window !== "undefined") window.location.href = "/login";
         throw err;
       } finally {
@@ -185,7 +242,6 @@ async function request(
     } else {
       await new Promise((resolve) => waiters.push(resolve));
     }
-
     // retry una vez con el token ya rotado
     const retried = await fetch(url, {
       ...opts,
@@ -194,6 +250,7 @@ async function request(
     if (!retried.ok) {
       if (retried.status === 401) {
         storage.clear();
+        userStore.clear();
         if (typeof window !== "undefined") window.location.href = "/login";
       }
       const errText = await safeErrorText(retried);
@@ -238,13 +295,22 @@ export async function doLogin(email, password, remember = false) {
   const access = data?.access_token;
   if (!access) throw new Error("Login sin access_token");
   storage.set(access, remember);
+
+  // Guardar user si viene; si no, derivar desde token
+  if (data?.user) {
+    userStore.set(data.user, remember);
+  } else {
+    const role = roleFromToken(access);
+    if (role) userStore.set({ email, role }, remember);
+  }
+
   return data;
 }
+
 export async function doLogout() {
-  try {
-    await api.post("/auth/logout");
-  } catch {}
+  try { await api.post("/auth/logout"); } catch {}
   storage.clear();
+  userStore.clear();
   if (typeof window !== "undefined") window.location.href = "/login";
 }
 
@@ -262,6 +328,6 @@ export function fetchWorkingDaysMe(start, end, token = null, signal) {
   return api.get(`/calendar/working-days?${qs}`, token, {}, signal);
 }
 export function fetchUserWorkingDays(...args) {
-  // alias usado por AusenciasCalendario.jsx
   return fetchWorkingDays(...args);
 }
+

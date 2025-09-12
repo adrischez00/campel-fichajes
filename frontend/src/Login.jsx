@@ -1,12 +1,17 @@
 // src/Login.jsx
 import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import Header from "./components/shared/Header";
-import { doLogin, getAccessToken } from "./services/api"; // ⬅️ usamos el wrapper pro
+import { doLogin, getAccessToken } from "./services/api";
 
+// Decodificador local de JWT (sin depender de api.js)
 function decodeJwt(token) {
   try {
     const b64 = token.split(".")[1] || "";
-    const padded = b64.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(b64.length / 4) * 4, "=");
+    const padded = b64
+      .replace(/-/g, "+")
+      .replace(/_/g, "/")
+      .padEnd(Math.ceil(b64.length / 4) * 4, "=");
     return JSON.parse(atob(padded));
   } catch {
     return {};
@@ -14,11 +19,12 @@ function decodeJwt(token) {
 }
 
 export default function Login({ onLogin }) {
+  const navigate = useNavigate();
+
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [msg, setMsg] = useState("");
   const [loading, setLoading] = useState(false);
-  // opcional: “Recordarme” -> usa localStorage en vez de sessionStorage para el access
   const [remember, setRemember] = useState(false);
 
   useEffect(() => {
@@ -31,20 +37,31 @@ export default function Login({ onLogin }) {
     setMsg("");
     setLoading(true);
     try {
-      // doLogin llama a /auth/login-json, guarda el access y deja la cookie httpOnly de refresh
+      // Llama a /auth/login-json y guarda el access en storage (y refresh en cookie httpOnly)
       const data = await doLogin(email, password, remember);
 
-      // Leemos el access desde el storage del wrapper
+      // Lee el token guardado por el wrapper
       const token = getAccessToken();
       if (!token) throw new Error("Token no recibido");
 
+      // Saca role y usuario: el JWT actual no lleva role, así que priorizamos el body
       const payload = decodeJwt(token);
       const userFromResp = data?.user || data?.usuario || null;
-      const role = payload.role || userFromResp?.role || userFromResp?.rol || "employee";
-      const user = payload.sub || payload.email || userFromResp || email;
+      const role =
+        (userFromResp?.role ||
+          userFromResp?.rol ||
+          payload.role ||
+          "employee").toLowerCase();
+      const user = payload.sub || payload.email || userFromResp?.email || email;
 
-      // Devolvemos la sesión al App para que pinte el panel correspondiente
-      onLogin({ token, role, user });
+      // Propaga al estado global si tu App lo usa
+      if (typeof onLogin === "function") {
+        onLogin({ token, role, user });
+      }
+
+      // Redirige según rol
+      const target = role === "admin" ? "/admin" : "/";
+      navigate(target, { replace: true });
     } catch (err) {
       console.error("[LOGIN] error:", err);
       setMsg("Correo o contraseña incorrectos.");
@@ -70,7 +87,10 @@ export default function Login({ onLogin }) {
 
           <form onSubmit={handleSubmit} className="space-y-4" autoComplete="on">
             <div>
-              <label htmlFor="email" className="block text-sm font-medium text-gray-700 mb-1">
+              <label
+                htmlFor="email"
+                className="block text-sm font-medium text-gray-700 mb-1"
+              >
                 Correo electrónico
               </label>
               <input
@@ -87,7 +107,10 @@ export default function Login({ onLogin }) {
             </div>
 
             <div>
-              <label htmlFor="password" className="block text-sm font-medium text-gray-700 mb-1">
+              <label
+                htmlFor="password"
+                className="block text-sm font-medium text-gray-700 mb-1"
+              >
                 Contraseña
               </label>
               <input
