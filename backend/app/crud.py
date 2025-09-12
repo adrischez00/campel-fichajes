@@ -40,18 +40,24 @@ def _normalize_email_for_compare(e: str) -> str:
 
 def obtener_usuario_por_email(db: Session, email: str):
     """
-    Búsqueda robusta: trim + case-insensitive. Evita fallos por espacios
-    o mayúsculas en la BD o en la entrada.
+    Búsqueda robusta:
+      - normaliza la entrada (quita espacios, NBSP, lower)
+      - en BD elimina \s+ y NBSP antes de comparar (PostgreSQL: regexp_replace + replace)
     """
     if not email:
         return None
-    e = (email or "").strip()
+    norm = _normalize_email_for_compare(email)
+
+    # email_sin_nbsp = REPLACE(email, NBSP, '')
+    email_sin_nbsp = func.replace(models.User.email, "\u00A0", "")
+    # email_compact = REGEXP_REPLACE(email_sin_nbsp, '\s+', '', 'g')
+    email_compact = func.regexp_replace(email_sin_nbsp, r"\s+", "", "g")
+
     return (
         db.query(models.User)
-        .filter(func.lower(func.trim(models.User.email)) == e.lower())
+        .filter(func.lower(email_compact) == norm)
         .first()
     )
-
 
 def obtener_usuario_por_id(db: Session, user_id: int) -> Optional[models.User]:
     return db.query(models.User).filter(models.User.id == user_id).first()
@@ -59,23 +65,39 @@ def obtener_usuario_por_id(db: Session, user_id: int) -> Optional[models.User]:
 def crear_usuario(db: Session, email: str, password: str, role: str = "employee"):
     from app import auth
     hashed_pw = auth.hashear_password(password)
-    usuario = models.User(email=email, hashed_password=hashed_pw, role=role)
+    usuario = models.User(email=email.strip(), hashed_password=hashed_pw, role=role)
     db.add(usuario)
     db.commit()
     db.refresh(usuario)
     return usuario
 
 def autenticar_usuario(db: Session, email: str, password: str):
+    """
+    Autenticación tolerante:
+      - busca con email normalizado
+      - acepta hash en columnas legacy (hashed_password / password_hash / password)
+      - hace strip() del hash antes de verificar
+    """
     from app import auth
     usuario = obtener_usuario_por_email(db, email)
     if not usuario:
         return None
-    if not auth.verificar_password(password, usuario.hashed_password):
+
+    hashed = (
+        getattr(usuario, "hashed_password", None)
+        or getattr(usuario, "password_hash", None)
+        or getattr(usuario, "password", None)
+    )
+    if isinstance(hashed, str):
+        hashed = hashed.strip()
+
+    if not hashed or not auth.verificar_password(password, hashed):
         return None
     return usuario
 
 def obtener_usuarios(db: Session):
     return db.query(models.User).all()
+
 # ========================
 #  Fichajes
 # ========================

@@ -4,7 +4,7 @@ from typing import List, Optional
 from datetime import datetime
 
 import pytz
-from fastapi import FastAPI, Depends, HTTPException, status, Header, Form, Request, Response
+from fastapi import FastAPI, Depends, HTTPException, status, Header, Form, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
@@ -41,10 +41,12 @@ STATIC_ALLOWED = [
     "https://sistema-fichajes.pages.dev",
     "https://campel-fichajes.pages.dev",
 ]
-DEFAULT_PREVIEWS_REGEX = r"^https://[a-z0-9-]+--(sistema-fichajes|campel-fichajes)\.pages\.dev$"
+
+# Permite también previews en Pages (subdominios tipo xyz--campel-fichajes.pages.dev)
+DEFAULT_PREVIEWS_REGEX = r"^https://([a-z0-9-]+--)?(sistema-fichajes|campel-fichajes)\.pages\.dev$"
 PAGES_PREVIEWS_REGEX = os.getenv("ALLOW_ORIGIN_REGEX", DEFAULT_PREVIEWS_REGEX)
 
-ALLOW_LOCALHOST = os.getenv("ALLOW_LOCALHOST", "1") not in ("0", "false", "False")
+ALLOW_LOCALHOST = os.getenv("ALLOW_LOCALHOST", "1").lower() not in ("0", "false")
 LOCALHOST_ALLOWED = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
@@ -62,35 +64,11 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_origin_regex=PAGES_PREVIEWS_REGEX,
     allow_credentials=True,
-    allow_methods=["*"],   # importante para preflight
-    allow_headers=["*"],   # importante para preflight
+    allow_methods=["*"],              # GET, POST, PUT, PATCH, DELETE, OPTIONS...
+    allow_headers=["*"],              # Authorization, Content-Type, X-Requested-With...
     expose_headers=["Content-Disposition"],
     max_age=600,
 )
-
-# Refuerzo: garantizar headers CORS incluso si el handler lanza 500
-@app.middleware("http")
-async def _force_cors_headers(req: Request, call_next):
-    import re as _re
-    origin = req.headers.get("origin")
-    try:
-        resp = await call_next(req)
-    except Exception:
-        # Si algo revienta, devolvemos 500 pero con CORS correcto
-        resp = Response("Internal Server Error", status_code=500)
-    if origin and (origin in ALLOWED_ORIGINS or (_re.match(PAGES_PREVIEWS_REGEX, origin or "") is not None)):
-        resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Access-Control-Allow-Credentials"] = "true"
-        # Vary para caches
-        prev = resp.headers.get("Vary")
-        resp.headers["Vary"] = ("Origin" if not prev else f"{prev}, Origin")
-    return resp
-
-# Respuesta universal a OPTIONS (preflight)
-@app.options("/{path:path}")
-def _any_options(path: str):
-    return Response(status_code=204)
-
 
 # ---------------- Zona horaria + helper ----------------
 TZ_MADRID = pytz.timezone("Europe/Madrid")
@@ -193,9 +171,10 @@ def fichar_handler(
 
         fich = crud.crear_fichaje(db, tipo, usuario)
 
+        import re as _re
         auto_aplicado, solicitud_id, cerrado_en = False, None, None
         if (tipo or "").lower() == "entrada" and era_entrada_abierta and ultima_entrada_ts:
-            pat = re.compile(r"\[asistido por solicitud #(\d+)\]")
+            pat = _re.compile(r"\[asistido por solicitud #(\d+)\]")
             salidas = (
                 db.query(models.Fichaje)
                 .filter(
