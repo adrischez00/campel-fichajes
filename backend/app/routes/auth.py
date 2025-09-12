@@ -1,5 +1,6 @@
-from datetime import timedelta
 import os
+import traceback
+from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status, Response, Request
 from fastapi.security import OAuth2PasswordRequestForm
@@ -8,21 +9,20 @@ from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.crud import obtener_usuario_por_email
-from app.auth import (
-    verificar_password,
-    crear_token_acceso,
-    decodificar_token,
-)
+from app.auth import verificar_password, crear_token_acceso, decodificar_token
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 legacy = APIRouter(tags=["auth"])
 
-# ============= Config cookie de refresh =============
+def _dbg(msg: str):
+    print(f"[AUTHDEBUG] {msg}")
+
+# ============= cookie refresh =============
 COOKIE_NAME = "refresh_token"
 COOKIE_PATH = "/"
 COOKIE_SECURE = os.getenv("COOKIE_SECURE", "true").lower() == "true"  # en local: false
 COOKIE_HTTPONLY = True
-COOKIE_SAMESITE = "none"  # front/back en dominios distintos (HTTPS)
+COOKIE_SAMESITE = "none"
 REFRESH_DAYS = int(os.getenv("REFRESH_DAYS", "30"))
 
 def _set_refresh_cookie(resp: Response, token: str):
@@ -36,7 +36,6 @@ def _set_refresh_cookie(resp: Response, token: str):
         samesite=COOKIE_SAMESITE,
     )
 
-# ================= Helpers =================
 class LoginJSON(BaseModel):
     email: str
     password: str
@@ -58,56 +57,54 @@ def _token_response(user, response: Response):
         "user": {"email": user.email, "role": getattr(user, "role", None)},
     }
 
-def _safe_verify(plain: str, hashed: str) -> bool:
-    try:
-        return verificar_password(plain, hashed)
-    except Exception:
-        return False
-
 def _login(db: Session, username_or_email: str, password: str, response: Response):
-    user = obtener_usuario_por_email(db, (username_or_email or "").strip())
-    if not user:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
-    hashed = (
-        getattr(user, "hashed_password", None)
-        or getattr(user, "password_hash", None)
-        or getattr(user, "password", None)
-    )
-    if not hashed or not _safe_verify(password, hashed):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
-    return _token_response(user, response)
+    try:
+        email_in = (username_or_email or "").strip()
+        _dbg(f"login attempt email='{email_in}'")
 
-# ================= Endpoints =================
-@router.post("/login", summary="Login (form-urlencoded: username, password)")
+        user = obtener_usuario_por_email(db, email_in)
+        _dbg(f"user_found={bool(user)}")
+
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
+
+        hashed = (
+            getattr(user, "hashed_password", None)
+            or getattr(user, "password_hash", None)
+            or getattr(user, "password", None)
+        )
+        _dbg(f"user.hash len={len(hashed or '')} pref='{(hashed or '')[:7]}'")
+
+        ok = verificar_password(password, hashed or "")
+        _dbg(f"password_ok={ok}")
+
+        if not ok:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales inválidas")
+
+        return _token_response(user, response)
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        _dbg(f"_login unexpected: {repr(e)}")
+        _dbg(traceback.format_exc())
+        # No filtramos a cliente: 401 genérico
+        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+
+# ===== endpoints =====
+@router.post("/login")
 def login_form(response: Response, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    try:
-        return _login(db, form.username, form.password, response)
-    except HTTPException:
-        raise
-    except Exception:
-        # nunca 500 hacia el front en login
-        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    return _login(db, form.username, form.password, response)
 
-@router.post("/token", summary="Alias de /auth/login")
+@router.post("/token")
 def token_form(response: Response, form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
-    try:
-        return _login(db, form.username, form.password, response)
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    return _login(db, form.username, form.password, response)
 
-@router.post("/login-json", summary="Login JSON {email,password}")
+@router.post("/login-json")
 def login_json(response: Response, payload: LoginJSON, db: Session = Depends(get_db)):
-    try:
-        email = (payload.email or "").strip()
-        return _login(db, email, payload.password, response)
-    except HTTPException:
-        raise
-    except Exception:
-        raise HTTPException(status_code=401, detail="Credenciales inválidas")
+    return _login(db, payload.email, payload.password, response)
 
-@router.post("/refresh", summary="Emite nuevo access usando cookie httpOnly refresh_token (rota refresh)")
+@router.post("/refresh")
 def refresh(request: Request, response: Response):
     token = request.cookies.get(COOKIE_NAME)
     if not token:
@@ -117,11 +114,11 @@ def refresh(request: Request, response: Response):
         raise HTTPException(status_code=401, detail="Refresh inválido")
     email = data["sub"]
     new_access = _issue_access(email)
-    new_refresh = _issue_refresh(email)
+    new_refresh = _issue_refresh(email)  # rotación
     _set_refresh_cookie(response, new_refresh)
     return {"access_token": new_access, "token_type": "bearer"}
 
-@router.post("/logout", summary="Borra cookie refresh_token")
+@router.post("/logout")
 def logout(response: Response):
     response.delete_cookie(
         key=COOKIE_NAME,
