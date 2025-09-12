@@ -4,7 +4,7 @@ from typing import List, Optional
 from datetime import datetime
 
 import pytz
-from fastapi import FastAPI, Depends, HTTPException, status, Header, Form, Request
+from fastapi import FastAPI, Depends, HTTPException, status, Header, Form, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordRequestForm
 from fastapi.staticfiles import StaticFiles
@@ -62,11 +62,27 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_origin_regex=PAGES_PREVIEWS_REGEX,
     allow_credentials=True,
-    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type", "X-Requested-With"],
+    allow_methods=["*"],              # preflight OK para cualquier método
+    allow_headers=["*"],              # preflight OK para cualquier cabecera
     expose_headers=["Content-Disposition"],
     max_age=600,
 )
+
+# Refuerzo extra (algunos proxies se “comen” los headers del CORSMiddleware)
+@app.middleware("http")
+async def _force_cors_headers(req: Request, call_next):
+    origin = req.headers.get("origin")
+    resp = await call_next(req)
+    if origin and (origin in ALLOWED_ORIGINS or re.match(PAGES_PREVIEWS_REGEX, origin or "")):
+        resp.headers.setdefault("Access-Control-Allow-Origin", origin)
+        resp.headers.setdefault("Vary", "Origin")
+        resp.headers.setdefault("Access-Control-Allow-Credentials", "true")
+    return resp
+
+# OPTIONS global para que TODO preflight responda 204
+@app.options("/{path:path}")
+def _any_options(path: str):
+    return Response(status_code=204)
 
 # ---------------- Zona horaria + helper ----------------
 TZ_MADRID = pytz.timezone("Europe/Madrid")
@@ -275,7 +291,6 @@ app.include_router(ausencias_router.router, prefix="/api")
 app.include_router(logs_router.router,     prefix="/api/logs")
 
 # Endpoints canónicos
-from app.schemas import UserOut, UsuarioUpdate, UsuarioPassword
 app.add_api_route("/api/registrar",             registrar_handler,             methods=["POST"])
 app.add_api_route("/api/usuarios",              listar_usuarios_handler,       methods=["GET"], response_model=List[UserOut])
 app.add_api_route("/api/usuarios/{usuario_id}", actualizar_usuario_handler,    methods=["PUT"])
@@ -354,7 +369,6 @@ def legacy_ausencias_wildcard_redirect(path: str):
     return RedirectResponse(url=f"/api/ausencias/{path}", status_code=307)
 
 # ---------------- Static ----------------
-from fastapi.staticfiles import StaticFiles
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # ---------------- Entrypoint ----------------

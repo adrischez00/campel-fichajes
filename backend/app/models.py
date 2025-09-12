@@ -29,6 +29,7 @@ class User(Base):
         passive_deletes=True,
     )
 
+
 class Fichaje(Base):
     __tablename__ = "fichajes"
 
@@ -50,6 +51,7 @@ class Fichaje(Base):
     usuario = relationship("User", back_populates="fichajes")
 
     solicitud = relationship("SolicitudManual", back_populates="fichaje", uselist=False)
+
 
 class SolicitudManual(Base):
     __tablename__ = "solicitudes"
@@ -73,6 +75,7 @@ class SolicitudManual(Base):
 
     fichaje = relationship("Fichaje", back_populates="solicitud", uselist=False)
 
+
 class LogAuditoria(Base):
     __tablename__ = "logs"
 
@@ -85,6 +88,7 @@ class LogAuditoria(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
 
     usuario = relationship("User", back_populates="logs")
+
 
 class Ausencia(Base):
     __tablename__ = "ausencias"
@@ -125,6 +129,7 @@ class Ausencia(Base):
         foreign_keys=[usuario_email],
     )
 
+
 # =========================
 # Calendario & Localización
 # =========================
@@ -135,12 +140,14 @@ class Region(Base):
     name = Column(String, nullable=False)
     code = Column(String, index=True)
 
+
 class Locality(Base):
     __tablename__ = "localities"
     id = Column(Integer, primary_key=True)
     name = Column(String, nullable=False)
     ine_code = Column(String, index=True)
     region_id = Column(Integer, ForeignKey("regions.id", ondelete="SET NULL"), index=True)
+
 
 class UserLocation(Base):
     __tablename__ = "user_locations"
@@ -151,6 +158,7 @@ class UserLocation(Base):
     locality_id = Column(Integer, ForeignKey("localities.id", ondelete="SET NULL"), index=True, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
     user = relationship("User")
+
 
 class CalendarMark(Base):
     __tablename__ = "calendar_marks"
@@ -171,6 +179,7 @@ class CalendarMark(Base):
             "region_id", "locality_id", name="uq_calendar_mark_scope"
         ),
     )
+
 
 class CalendarFeedStg(Base):
     __tablename__ = "calendar_feed_stg"
