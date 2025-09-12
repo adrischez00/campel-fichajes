@@ -62,27 +62,35 @@ app.add_middleware(
     allow_origins=ALLOWED_ORIGINS,
     allow_origin_regex=PAGES_PREVIEWS_REGEX,
     allow_credentials=True,
-    allow_methods=["*"],              # preflight OK para cualquier método
-    allow_headers=["*"],              # preflight OK para cualquier cabecera
+    allow_methods=["*"],   # importante para preflight
+    allow_headers=["*"],   # importante para preflight
     expose_headers=["Content-Disposition"],
     max_age=600,
 )
 
-# Refuerzo extra (algunos proxies se “comen” los headers del CORSMiddleware)
+# Refuerzo: garantizar headers CORS incluso si el handler lanza 500
 @app.middleware("http")
 async def _force_cors_headers(req: Request, call_next):
+    import re as _re
     origin = req.headers.get("origin")
-    resp = await call_next(req)
-    if origin and (origin in ALLOWED_ORIGINS or re.match(PAGES_PREVIEWS_REGEX, origin or "")):
-        resp.headers.setdefault("Access-Control-Allow-Origin", origin)
-        resp.headers.setdefault("Vary", "Origin")
-        resp.headers.setdefault("Access-Control-Allow-Credentials", "true")
+    try:
+        resp = await call_next(req)
+    except Exception:
+        # Si algo revienta, devolvemos 500 pero con CORS correcto
+        resp = Response("Internal Server Error", status_code=500)
+    if origin and (origin in ALLOWED_ORIGINS or (_re.match(PAGES_PREVIEWS_REGEX, origin or "") is not None)):
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+        # Vary para caches
+        prev = resp.headers.get("Vary")
+        resp.headers["Vary"] = ("Origin" if not prev else f"{prev}, Origin")
     return resp
 
-# OPTIONS global para que TODO preflight responda 204
+# Respuesta universal a OPTIONS (preflight)
 @app.options("/{path:path}")
 def _any_options(path: str):
     return Response(status_code=204)
+
 
 # ---------------- Zona horaria + helper ----------------
 TZ_MADRID = pytz.timezone("Europe/Madrid")
