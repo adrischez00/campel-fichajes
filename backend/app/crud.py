@@ -1,26 +1,25 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, date, time as _time
-from collections import defaultdict
-from typing import Optional, List, Dict
 import re
+from datetime import datetime, timedelta, date, time as _time
+from typing import Optional, List, Dict
 
 import pytz
-from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, text, func
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from app import models
 from app.utils import generar_hash_fichaje, log_evento
-from app.schemas_solicitudes import SolicitudManualCreate, SolicitudFiltro
 from app.config import HORAS_JORNADA_COMPLETA
-from app.models import Ausencia, LogAuditoria
+from app.schemas_solicitudes import SolicitudManualCreate, SolicitudFiltro
 from app.schemas_ausencias import AusenciaCreate, AusenciaUpdate
-
+from app.models import Ausencia, LogAuditoria
 
 # ======================== TZ & helpers ========================
 TZ_MADRID = pytz.timezone("Europe/Madrid")
 _VALID_TIPOS = {"entrada", "salida"}
+
 
 def _ensure_aware(dt: Optional[datetime], tz=TZ_MADRID) -> Optional[datetime]:
     if dt is None:
@@ -29,28 +28,30 @@ def _ensure_aware(dt: Optional[datetime], tz=TZ_MADRID) -> Optional[datetime]:
         return tz.localize(dt)
     return dt.astimezone(tz)
 
+
 def _safe_iso(dt: Optional[datetime]) -> Optional[str]:
     dt = _ensure_aware(dt)
     return dt.isoformat() if dt else None
 
+
 # ======================== Usuarios ========================
 def _normalize_email_for_compare(e: str) -> str:
-    # quita TODO tipo de espacios (incl. NBSP) y pasa a lower
+    """Quita TODO tipo de espacios (incl. NBSP) y pasa a lower."""
     return re.sub(r"\s+", "", (e or "")).replace("\u00A0", "").lower()
+
 
 def obtener_usuario_por_email(db: Session, email: str):
     """
     Búsqueda robusta:
       - normaliza la entrada (quita espacios, NBSP, lower)
-      - en BD elimina \s+ y NBSP antes de comparar (PostgreSQL: regexp_replace + replace)
+      - en BD elimina \s+ y NBSP antes de comparar (PostgreSQL)
     """
     if not email:
         return None
     norm = _normalize_email_for_compare(email)
 
-    # email_sin_nbsp = REPLACE(email, NBSP, '')
+    # email_compact = lower( REGEXP_REPLACE( REPLACE(email, NBSP, ''), '\s+', '', 'g') )
     email_sin_nbsp = func.replace(models.User.email, "\u00A0", "")
-    # email_compact = REGEXP_REPLACE(email_sin_nbsp, '\s+', '', 'g')
     email_compact = func.regexp_replace(email_sin_nbsp, r"\s+", "", "g")
 
     return (
@@ -59,17 +60,20 @@ def obtener_usuario_por_email(db: Session, email: str):
         .first()
     )
 
+
 def obtener_usuario_por_id(db: Session, user_id: int) -> Optional[models.User]:
     return db.query(models.User).filter(models.User.id == user_id).first()
+
 
 def crear_usuario(db: Session, email: str, password: str, role: str = "employee"):
     from app import auth
     hashed_pw = auth.hashear_password(password)
-    usuario = models.User(email=email.strip(), hashed_password=hashed_pw, role=role)
+    usuario = models.User(email=(email or "").strip(), hashed_password=hashed_pw, role=role)
     db.add(usuario)
     db.commit()
     db.refresh(usuario)
     return usuario
+
 
 def autenticar_usuario(db: Session, email: str, password: str):
     """
@@ -95,12 +99,12 @@ def autenticar_usuario(db: Session, email: str, password: str):
         return None
     return usuario
 
+
 def obtener_usuarios(db: Session):
     return db.query(models.User).all()
 
-# ========================
-#  Fichajes
-# ========================
+
+# ======================== Fichajes ========================
 def _ausencias_aprobadas_en_instante(db: Session, email: str, t: datetime):
     d = _ensure_aware(t, TZ_MADRID).date()
     return db.query(Ausencia).filter(
@@ -109,6 +113,7 @@ def _ausencias_aprobadas_en_instante(db: Session, email: str, t: datetime):
         Ausencia.fecha_inicio <= d,
         Ausencia.fecha_fin >= d
     ).all()
+
 
 def _instante_en_parcial(a: Ausencia, t: datetime, tz=TZ_MADRID) -> bool:
     if not a.parcial:
@@ -127,8 +132,9 @@ def _instante_en_parcial(a: Ausencia, t: datetime, tz=TZ_MADRID) -> bool:
     t = _ensure_aware(t, tz)
     return ini <= t <= fin
 
-# === AUTOCIERRE ASISTIDO
+
 def _autocerrar_turno_con_solicitud_salida(db: Session, usuario: models.User, ultima_entrada_dt: datetime):
+    """Si existe una solicitud de salida (pendiente o aprobada) entre última entrada y ahora, genera la salida."""
     ahora = datetime.now(TZ_MADRID)
     sol = (
         db.query(models.SolicitudManual)
@@ -181,6 +187,7 @@ def _autocerrar_turno_con_solicitud_salida(db: Session, usuario: models.User, ul
     db.refresh(fich)
     return fich
 
+
 def crear_fichaje(db: Session, tipo: str, usuario: models.User):
     tipo_norm = (tipo or "").strip().lower()
     if tipo_norm not in _VALID_TIPOS:
@@ -197,8 +204,10 @@ def crear_fichaje(db: Session, tipo: str, usuario: models.User):
             raise ValueError(f"❌ No puedes fichar: ausencia retribuida aprobada hoy ({a.tipo}).")
         if a.parcial and _instante_en_parcial(a, ahora):
             rango = []
-            if a.hora_inicio: rango.append(a.hora_inicio.strftime("%H:%M"))
-            if a.hora_fin: rango.append(a.hora_fin.strftime("%H:%M"))
+            if a.hora_inicio:
+                rango.append(a.hora_inicio.strftime("%H:%M"))
+            if a.hora_fin:
+                rango.append(a.hora_fin.strftime("%H:%M"))
             detalle = " - ".join(rango) if rango else "tramo parcial"
             raise ValueError(f"❌ No puedes fichar dentro de una ausencia parcial aprobada ({detalle}).")
 
@@ -250,6 +259,7 @@ def crear_fichaje(db: Session, tipo: str, usuario: models.User):
     db.refresh(fichaje)
     return fichaje
 
+
 def obtener_fichajes_usuario(db: Session, usuario: models.User):
     fichajes = (
         db.query(models.Fichaje)
@@ -271,9 +281,8 @@ def obtener_fichajes_usuario(db: Session, usuario: models.User):
         for f in fichajes
     ]
 
-# ========================
-#  Solicitudes Manuales
-# ========================
+
+# ======================== Solicitudes Manuales ========================
 def _parse_fecha_hora(fecha: str, hora: str, tz=TZ_MADRID) -> datetime:
     hora = (hora or "").strip()
     if len(hora.split(":")) == 2:
@@ -285,6 +294,7 @@ def _parse_fecha_hora(fecha: str, hora: str, tz=TZ_MADRID) -> datetime:
         except ValueError:
             continue
     raise ValueError("Formato de fecha/hora inválido. Usa dd/mm/YYYY o YYYY-mm-dd y HH:MM[:SS].")
+
 
 def crear_solicitud_manual(db: Session, data: SolicitudManualCreate, usuario: models.User):
     ts = _parse_fecha_hora(data.fecha, data.hora, TZ_MADRID)
@@ -304,6 +314,7 @@ def crear_solicitud_manual(db: Session, data: SolicitudManualCreate, usuario: mo
     db.commit()
     db.refresh(solicitud)
     return solicitud
+
 
 def listar_solicitudes_avanzado(
     db: Session,
@@ -367,8 +378,10 @@ def listar_solicitudes_avanzado(
 
     return {"items": items, "total": total, "page": page, "per_page": per_page}
 
+
 def listar_solicitudes(db: Session):
     return listar_solicitudes_avanzado(db, None)["items"]
+
 
 def aprobar_solicitud(db: Session, solicitud_id: int, admin: models.User, ip: Optional[str] = None):
     s = db.query(models.SolicitudManual).filter(models.SolicitudManual.id == solicitud_id).first()
@@ -449,6 +462,7 @@ def aprobar_solicitud(db: Session, solicitud_id: int, admin: models.User, ip: Op
     db.refresh(s)
     return s
 
+
 def rechazar_solicitud(db: Session, solicitud_id: int, admin: models.User, motivo_rechazo: str, ip: Optional[str] = None):
     motivo = (motivo_rechazo or "").strip()
     s = db.query(models.SolicitudManual).filter(models.SolicitudManual.id == solicitud_id).first()
@@ -485,9 +499,8 @@ def rechazar_solicitud(db: Session, solicitud_id: int, admin: models.User, motiv
     db.refresh(s)
     return s
 
-# ========================
-#  Logs (para UI)
-# ========================
+
+# ======================== Logs (para UI) ========================
 def obtener_logs(db: Session):
     fichajes = (
         db.query(models.Fichaje)
@@ -510,4 +523,134 @@ def obtener_logs(db: Session):
         })
     return resultado
 
-# (resto de helpers y calendario igual que ya tenías)
+
+# ======================== Resúmenes robustos ========================
+def _fichajes_limpios_ordenados(db: Session, user_id: int) -> List[models.Fichaje]:
+    """Carga fichajes del usuario ordenados, filtrando basura común."""
+    rows = (
+        db.query(models.Fichaje)
+        .filter(
+            models.Fichaje.user_id == user_id,
+            models.Fichaje.timestamp.isnot(None),
+        )
+        .order_by(models.Fichaje.timestamp.asc())
+        .all()
+    )
+    ok: List[models.Fichaje] = []
+    for f in rows:
+        t = (getattr(f, "tipo", "") or "").lower()
+        if t not in _VALID_TIPOS:
+            continue
+        validez = (getattr(f, "validez", "valido") or "valido").lower()
+        if validez == "invalidado":
+            continue
+        ts = getattr(f, "timestamp", None)
+        if ts is None:
+            continue
+        if not isinstance(ts, datetime):
+            try:
+                ts = datetime.fromisoformat(str(ts))
+            except Exception:
+                continue
+        f.tipo = t
+        f.timestamp = _ensure_aware(ts)
+        ok.append(f)
+    return ok
+
+
+def _sumar_solapado(d1: datetime, d2: datetime, w1: datetime, w2: datetime) -> int:
+    """Segundos de (d1,d2) que caen dentro de [w1,w2)."""
+    a = max(d1, w1)
+    b = min(d2, w2)
+    return max(0, int((b - a).total_seconds()))
+
+
+def _parear_turnos(fichajes: List[models.Fichaje]):
+    """
+    Genera pares (entrada, salida). Si hay entrada sin salida -> turno_abierto.
+    Si hay salida sin entrada previa, se ignora.
+    """
+    abierta: Optional[models.Fichaje] = None
+    for f in fichajes:
+        if f.tipo == "entrada":
+            abierta = f
+        elif f.tipo == "salida":
+            if abierta:
+                yield (abierta, f)
+                abierta = None
+    return
+
+
+def resumen_fichajes_usuario(db: Session, usuario: models.User):
+    """
+    - Suma SOLO fichajes 'valido'
+    - Ignora registros corruptos
+    - Para turno abierto, muestra en_turno=True y suma hasta 'ahora'
+    """
+    fichajes = _fichajes_limpios_ordenados(db, usuario.id)
+    ahora = datetime.now(TZ_MADRID)
+
+    # Ventanas de cálculo
+    hoy0 = ahora.replace(hour=0, minute=0, second=0, microsecond=0)
+    maniana0 = hoy0 + timedelta(days=1)
+
+    # Último fichaje
+    ultimo = fichajes[-1] if fichajes else None
+    ultimo_dict = {
+        "tipo": (ultimo.tipo if ultimo else None),
+        "timestamp": _safe_iso(ultimo.timestamp if ultimo else None),
+        "validez": (getattr(ultimo, "validez", None) if ultimo else None),
+    }
+
+    # Sumas de hoy
+    seg_hoy = 0
+    en_turno = False
+    desde_turno = None
+
+    for ent, sal in _parear_turnos(fichajes):
+        seg_hoy += _sumar_solapado(ent.timestamp, sal.timestamp, hoy0, maniana0)
+
+    # turno abierto?
+    if fichajes and fichajes[-1].tipo == "entrada":
+        en_turno = True
+        desde_turno = fichajes[-1].timestamp
+        seg_hoy += _sumar_solapado(desde_turno, ahora, hoy0, maniana0)
+
+    return {
+        "hoy": {
+            "trabajado_seg": seg_hoy,
+        },
+        "turno": {
+            "abierto": en_turno,
+            "desde": _safe_iso(desde_turno),
+        },
+        "ultimo": ultimo_dict,
+    }
+
+
+def resumen_semana_usuario(db: Session, usuario: models.User):
+    """
+    Suma de la semana ISO (lunes 00:00 -> ahora), mismo criterio que arriba.
+    """
+    fichajes = _fichajes_limpios_ordenados(db, usuario.id)
+    ahora = datetime.now(TZ_MADRID)
+
+    # lunes 00:00 de esta semana
+    dow = (ahora.weekday() + 7) % 7  # 0=lunes
+    semana0 = (ahora - timedelta(days=dow)).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    seg_semana = 0
+    for ent, sal in _parear_turnos(fichajes):
+        seg_semana += _sumar_solapado(ent.timestamp, sal.timestamp, semana0, ahora)
+
+    # turno abierto: añade hasta 'ahora'
+    if fichajes and fichajes[-1].tipo == "entrada":
+        seg_semana += _sumar_solapado(fichajes[-1].timestamp, ahora, semana0, ahora)
+
+    objetivo_dia_horas = float(HORAS_JORNADA_COMPLETA or 8)
+    return {
+        "semana": {
+            "trabajado_seg": seg_semana,
+            "objetivo_dia_horas": objetivo_dia_horas,
+        }
+    }

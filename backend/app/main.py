@@ -220,11 +220,23 @@ def obtener_fichajes_handler(usuario: str = Header(...), db: Session = Depends(g
         raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return crud.obtener_fichajes_usuario(db, user)
 
+# ---- Resumen de fichajes ----
+from fastapi import HTTPException
+import traceback
+
 def resumen_fichajes_handler(
     db: Session = Depends(get_db),
     usuario: User = Depends(get_current_user)
 ):
-    return crud.resumen_fichajes_usuario(db, usuario)
+    try:
+        return crud.resumen_fichajes_usuario(db, usuario)
+    except Exception as e:
+        # 🔎 log a Cloud Run
+        print("[RESUMEN_FICHAJES_ERR]", repr(e))
+        traceback.print_exc()
+        # evita reventar el front con HTML/plaintext
+        raise HTTPException(status_code=500, detail="Error interno (resumen_fichajes)")
+
 
 def resumen_semana_handler(
     db: Session = Depends(get_db),
