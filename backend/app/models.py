@@ -1,3 +1,4 @@
+# app/models.py
 from sqlalchemy import (
     Column, Integer, String, DateTime, Boolean, ForeignKey, Date, Time, Text,
     func, UniqueConstraint
@@ -18,9 +19,21 @@ class User(Base):
     hashed_password = Column(String, nullable=False)
     role = Column(String, default="employee")
 
+    # --- FIX: desambiguar relaciones con SolicitudManual y LogAuditoria
     fichajes = relationship("Fichaje", back_populates="usuario")
-    solicitudes = relationship("SolicitudManual", back_populates="usuario")
-    logs = relationship("LogAuditoria", back_populates="usuario")
+
+    solicitudes = relationship(
+        "SolicitudManual",
+        back_populates="usuario",
+        foreign_keys="SolicitudManual.user_id",        # <-- FIX
+    )
+
+    logs = relationship(
+        "LogAuditoria",
+        back_populates="usuario",
+        foreign_keys="LogAuditoria.user_id",           # <-- explícito (no obligatorio, pero claro)
+    )
+
     ausencias = relationship(
         "Ausencia",
         back_populates="usuario",
@@ -41,9 +54,10 @@ class Fichaje(Base):
     is_manual = Column(Boolean, default=False)
     motivo = Column(String, nullable=True)
 
-    # 'valido' | 'provisional' | 'invalidado'
+    # estado de cómputo
     validez = Column(String, nullable=False, default="valido", index=True)
 
+    # vínculo opcional con solicitud
     solicitud_id = Column(Integer, ForeignKey("solicitudes.id", ondelete="SET NULL"),
                           nullable=True, index=True)
 
@@ -64,15 +78,22 @@ class SolicitudManual(Base):
     estado = Column(String, default="pendiente")    # 'pendiente' | 'aprobada' | 'rechazada'
     timestamp = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
+    # --- dos FKs a users.id
     user_id = Column(Integer, ForeignKey("users.id"))
-    usuario = relationship("User", back_populates="solicitudes")
-
     gestionado_por_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    gestionado_por = relationship("User", foreign_keys=[gestionado_por_id])
-    gestionado_en = Column(DateTime(timezone=True), nullable=True)
-    motivo_rechazo = Column(String, nullable=True)
-    ip_origen = Column(String, nullable=True)
 
+    # --- FIX: indicar foreign_keys en ambas relaciones a User
+    usuario = relationship(
+        "User",
+        back_populates="solicitudes",
+        foreign_keys=[user_id],                       # <-- FIX
+    )
+    gestionado_por = relationship(
+        "User",
+        foreign_keys=[gestionado_por_id],             # <-- FIX
+    )
+
+    # enlace 1:1 con fichaje generado
     fichaje = relationship("Fichaje", back_populates="solicitud", uselist=False)
 
 
@@ -87,7 +108,11 @@ class LogAuditoria(Base):
                        server_default=func.now(), index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
 
-    usuario = relationship("User", back_populates="logs")
+    usuario = relationship(
+        "User",
+        back_populates="logs",
+        foreign_keys=[user_id],                        # explícito
+    )
 
 
 class Ausencia(Base):
